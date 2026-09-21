@@ -93,6 +93,13 @@ export interface ModelRouteSelection {
   reasoningEffort?: string
 }
 
+/** 归一化后的模型路由选择：三个字段都保证是字符串（resolveModelRoute 的产物）。 */
+export interface ResolvedModelRoute {
+  provider: string
+  model: string
+  reasoningEffort: string
+}
+
 /** 会话级覆写（顶栏气泡写入，不污染全局配置）。 */
 export interface SessionOverrideConfig {
   enabled?: boolean
@@ -144,7 +151,7 @@ export interface ResolvedValueRouterConfig {
   scope: ValueRouterScope
   excludePresets: string[]
   strategy: ValueRouterStrategy
-  executor: ModelRouteSelection
+  executor: ResolvedModelRoute
   maxDepth: number
   autoDelegate: boolean
   allowedTaskTypes: string[]
@@ -308,7 +315,7 @@ function objRecord(v: unknown): Record<string, unknown> {
 }
 
 /** 归一化模型路由选择：全部为 trim 后的字符串，缺省空串。 */
-export function resolveModelRoute(v: unknown): ModelRouteSelection {
+export function resolveModelRoute(v: unknown): ResolvedModelRoute {
   const raw = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>
   return {
     provider: typeof raw.provider === 'string' ? raw.provider.trim() : '',
@@ -450,11 +457,21 @@ export function strategyLabel(strategy: ValueRouterStrategy): string {
   return strategy === 'saver' ? '更省' : strategy === 'powerful' ? '更强' : '平衡'
 }
 
-/** 设置校验：enabled 时 executor 必须完整（防呆；只用桥的场景可把 executor 配成与主模型同款）。 */
+/**
+ * 设置校验：拒绝「半配置」的 executor（只填了 provider 或只填了 model）。
+ *
+ * 完全为空是**合法**状态，表示尚未选择执行模型：子代理通道自动关闭
+ * （routing.ts 的 `executor-incomplete`），插件照常加载，用户可在首次引导或
+ * 设置卡里补全。因此这里不能要求 executor 必须完整——settings 的 validate 会在
+ * 注册命名空间时就被调用一次，抛错会让整个插件树加载失败（实测踩过）。
+ */
 export function assertConfigValid(raw: Partial<ValueRouterConfig> | undefined | null): void {
   const resolved = resolveConfig(raw)
-  if (resolved.enabled && !isCompleteModelRoute(resolved.executor)) {
-    throw new Error('子代理执行模型（executor）未选择具体 provider/model')
+  if (!resolved.enabled) return
+  const provider = resolved.executor.provider.trim()
+  const model = resolved.executor.model.trim()
+  if ((provider === '') !== (model === '')) {
+    throw new Error('子代理执行模型（executor）需要同时选择 provider 与 model，或两者都留空')
   }
 }
 

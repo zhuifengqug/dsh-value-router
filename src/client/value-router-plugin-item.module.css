@@ -1,6 +1,6 @@
 /* Single-card shell for the Plugins settings section.
  * This <li> IS the official-style card: rounded shell, header, divider,
- * body. The inner ValueModeSettingsCard renders borderless so there is no
+ * body. The inner ValueRouterSettingsCard renders borderless so there is no
  * double frame. Uses only the semantic tokens the section provides
  * (dsw-alias-*), same as the official PluginCard. */
 .card {
@@ -95,7 +95,7 @@
 
 /* The inner settings form must not draw its own card frame: the <li>
  * above already is the card. Neutralize only frame properties. */
-.body [data-value-mode-card='true'] {
+.body [data-value-router-card='true'] {
   background: transparent;
   border: 0;
   border-radius: 0;

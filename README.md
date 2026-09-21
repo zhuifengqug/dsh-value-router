@@ -120,24 +120,44 @@ bridge.maxBatchItems        默认 10
 
 ```bash
 pnpm install
-pnpm typecheck     # tsc -b（host + client 两个 project）+ 测试类型检查
-pnpm test          # vitest run
+pnpm typecheck     # tsc --noEmit -p tsconfig.json（宿主+测试） && tsc --noEmit -p tsconfig.client.json（浏览器）
+pnpm test          # vitest run（11 个文件 / 174 个用例）
 pnpm test:node     # 同一批测试用 Node 自带 runner 跑（受限环境下无子进程）
-pnpm build         # tsc -b && tsdown（lib/index.js、lib/typert.js、lib/status-controller.js、lib/client/index.js）
+pnpm build         # tsdown：lib/index.js+.d.ts、lib/typert.js+.d.ts、lib/status-controller.js+.d.ts、lib/client/index.js
 ```
+
+构建布局与两个来源插件一致：**tsc 只做 `--noEmit` 类型检查，`lib/` 全部由 tsdown 产出**（服务端 ESM + 声明文件，客户端自注册经典脚本）。这样避免两套工具往同一个 `lib/` 写文件、产物互相覆盖。
 
 测试统一用 `node:test` + `node:assert` 的 API 书写；`vitest.config.ts` 把 `node:test` 映射到 `test/node-test-shim.ts`，所以两种 runner 跑的是同一批文件。
 
-关键回归项（`test/routing.test.ts`）：**主会话（`origin !== 'subagent'`）在任何 scope / 任何配置下都不被改写**。
+关键回归项：
+
+- `test/routing.test.ts`：**主会话（`origin !== 'subagent'`）在任何 scope / 任何配置下都不被改写**；
+- `test/config.test.ts`：默认配置（executor 未选）必须可加载——settings 的 `validate` 在注册命名空间时就会被调用一次，抛错会让整个插件树加载失败（实测踩过）；
+- `test/typert.test.ts`：复刻 `dsh-typert-loader` 的清单校验规则，并交叉校验客户端 descriptor 的 `typeSymbol` 与宿主逐字一致。
 
 ## 9. 安装
 
-插件经 profile 的 `dsh.profile.bundles` 全局装载（与两个来源插件相同）：
+插件经 profile 的 `dsh.profile.bundles` 全局装载（与两个来源插件相同）。推荐用 `dsh plugin` 管理，它会转发 pnpm 并**按已安装状态自动同步 `bundles` 列表**：
 
-```jsonc
-// <DSH_HOME>/profiles/<profile>/package.json
-"dependencies": { "@gjs27/dsh-value-router": "file:D:/dsh-workspaces/dev/local-plugins/dsh-value-router" },
-"dsh": { "profile": { "bundles": [ /* ..., */ "@gjs27/dsh-value-router" ] } }
+```bash
+# 本地开发用 link:（软链，改完 lib 后重启即生效）
+dsh plugin --profile web add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
 ```
 
-迁移自旧插件时，把 `@gjs27/dsh-deepseek-web-delegate` 与 `@linxin666/dsh-value-mode` 从 bundles/dependencies 移除，并删除 `<DSH_HOME>/.agent-presets/{deepseek-web,value-mode}`（这两个目录由旧插件同步；`value-router` 预设由本插件同步）。
+> 用 `file:` 时 pnpm 会把包**复制**进 profile 的 node_modules，之后重建 `lib/` 不会生效（要重新 install）；开发期请用 `link:`。
+
+迁移自旧插件时，把 `@gjs27/dsh-deepseek-web-delegate` 与 `@linxin666/dsh-value-mode` 从 bundles/dependencies 移除（`dsh plugin --profile web remove ...`），并删除 `<DSH_HOME>/.agent-presets/{deepseek-web,value-mode}`（这两个目录由旧插件同步；`value-router` 预设由本插件同步）。
+
+### 启动自检
+
+改完插件后用**独立 profile** 做启动自检：既不被主 profile 里其它插件干扰，也不影响正在运行的主实例。
+
+```bash
+dsh plugin --profile vr-check install
+dsh plugin --profile vr-check add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
+# 再把 "@deepseek-ai/dsh-web-app" 加进 vr-check 的 dsh.profile.bundles
+dsh --profile vr-check --port 3081 --no-open
+```
+
+判据：启动日志出现 `dsh web: http://127.0.0.1:3081/?token=...`；带 token 打开首页后，启动 combo（`/plugins/??...`）里应包含 `@gjs27/dsh-value-router/client.js`。

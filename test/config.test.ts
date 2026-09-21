@@ -139,8 +139,15 @@ test('normalizeSessionOverride 丢弃未知键与非法值', () => {
   )
 })
 
-test('assertConfigValid：enabled 但 executor 不完整时抛错', () => {
+test('assertConfigValid：默认（未选 executor）必须可加载，半配置才抛错', () => {
+  // 回归项：settings 的 validate 会在注册时被调用，这里抛错会让插件树加载失败。
+  assert.doesNotThrow(() => assertConfigValid(undefined))
+  assert.doesNotThrow(() => assertConfigValid({}))
+  assert.doesNotThrow(() => assertConfigValid({ enabled: true }))
+  assert.doesNotThrow(() => assertConfigValid({ enabled: true, executor: { provider: '', model: '' } }))
+  // 半配置（只填一边）是真错误
   assert.throws(() => assertConfigValid({ enabled: true, executor: { provider: 'p' } }))
+  assert.throws(() => assertConfigValid({ enabled: true, executor: { model: 'm' } }))
   assert.doesNotThrow(() => assertConfigValid({ enabled: true, executor: { provider: 'p', model: 'm' } }))
   assert.doesNotThrow(() => assertConfigValid({ enabled: false }))
 })

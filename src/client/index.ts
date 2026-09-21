@@ -1,6 +1,14 @@
 /**
- * @module @linxin666/dsh-value-mode/client
- * Browser half of the Value Mode (性价比模式) plugin.
+ * @module @gjs27/dsh-value-router/client
+ * 价值路由（Value Router）浏览器侧。
+ *
+ * 三个注册面：
+ * - settings.plugin.item → 「插件」设置区的卡片（路由区 + 桥配置区）；
+ * - conversation.session.header.actions → 顶栏徽章 + 快捷设置气泡（含会话级覆写）；
+ * - 文档级附加面 → 空白会话 Hero 上的首次引导（不替换官方预设选择器）。
+ *
+ * 本文件用 React.createElement（不写 JSX）：入口是 loader 直接执行的经典脚本，
+ * 保持零 jsx 变换假设。.tsx 组件照常使用 JSX。
  */
 
 import { createElement } from 'react'
@@ -13,32 +21,30 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 
-import type { ModelRouteSelection, ValueModeConfig, ValueModeSettingsScope } from '../core/config.ts'
-import { hasExplicitModelRoutes, VALUE_MODE_SETTINGS_NAMESPACE } from '../core/config.ts'
-import { zh, en, type ValueModeLocaleKey } from './locales.ts'
-import { ValueModeSettingsCard } from './ValueModeSettingsCard.tsx'
-import { ValueModePluginSettingsCard } from './ValueModePluginSettingsCard.tsx'
-import { ValueModeHeaderStatus } from './ValueModeHeaderStatus.tsx'
-import { ValueModeHeroOnboarding } from './ValueModeHeroOnboarding.tsx'
-import type { ValueModeModelCatalog } from './ModelPicker.tsx'
-import { reportValueModeTelemetry } from './telemetry.ts'
+import type { ValueRouterConfig } from '../core/config.ts'
+import { VALUE_ROUTER_SETTINGS_NAMESPACE, isCompleteModelRoute } from '../core/config.ts'
+import { zh, en, type ValueRouterLocaleKey } from './locales.ts'
+import { ValueRouterSettingsCard } from './ValueRouterSettingsCard.tsx'
+import { ValueRouterPluginSettingsCard } from './ValueRouterPluginSettingsCard.tsx'
+import { ValueRouterHeaderStatus } from './ValueRouterHeaderStatus.tsx'
+import { ValueRouterHeroOnboarding } from './ValueRouterHeroOnboarding.tsx'
+import type { ValueRouterModelCatalog } from './ModelPicker.tsx'
+import { reportValueRouterTelemetry } from './telemetry.ts'
 import { createModelCatalogLoader } from './model-catalog.ts'
-import { createValueModeSettingsWriter } from './settings-write.ts'
+import { createValueRouterSettingsWriter } from './settings-write.ts'
 
-export { ValueModeSettingsCard } from './ValueModeSettingsCard.tsx'
-export { ValueModePluginSettingsCard } from './ValueModePluginSettingsCard.tsx'
-export { ValueModeHeaderStatus } from './ValueModeHeaderStatus.tsx'
-export { ValueModeHeroOnboarding } from './ValueModeHeroOnboarding.tsx'
-// Kept as a public export for existing integrations. It is intentionally not
-// injected into the composer: the previous control only changed local UI
-// state and never reached the host's expert consultation route.
-export { ManualExpertToggle } from './ManualExpertToggle.tsx'
+export { ValueRouterSettingsCard } from './ValueRouterSettingsCard.tsx'
+export { ValueRouterPluginSettingsCard } from './ValueRouterPluginSettingsCard.tsx'
+export { ValueRouterHeaderStatus } from './ValueRouterHeaderStatus.tsx'
+export { ValueRouterHeroOnboarding } from './ValueRouterHeroOnboarding.tsx'
 export { ModelPicker } from './ModelPicker.tsx'
 export * from './locales.ts'
+export * from './use-live-status.ts'
+export * from './bridge-models.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    'value-mode': ValueModeLocaleKey
+    'value-router': ValueRouterLocaleKey
   }
 
   interface SlotMap {
@@ -61,11 +67,12 @@ function isSettingsBinderFace(value: unknown): value is SettingsBinderFace {
 export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote', 'remote.session']
 
 interface HeroOnboardingMountOptions {
-  scope: ValueModeSettingsScope<ValueModeConfig>
-  defaultModelScope: ValueModeSettingsScope<ModelRouteSelection>
-  onChange: (patch: Partial<ValueModeConfig>) => Promise<void>
-  fetchModels: () => Promise<ValueModeModelCatalog>
+  scope: SettingsScope<ValueRouterConfig>
+  onChange: (patch: Partial<ValueRouterConfig>) => Promise<void>
+  fetchModels: () => Promise<ValueRouterModelCatalog>
 }
+
+const PRESET_MATCH = /价值路由|value\s*router|value-router/i
 
 function heroPresetButton(): HTMLButtonElement | undefined {
   const candidates = [...document.querySelectorAll<HTMLButtonElement>('button')]
@@ -75,41 +82,41 @@ function heroPresetButton(): HTMLButtonElement | undefined {
   })
 }
 
-function isValueModeHeroButton(button: HTMLButtonElement): boolean {
+function isValueRouterHeroButton(button: HTMLButtonElement): boolean {
   const label = `${button.textContent ?? ''} ${button.getAttribute('aria-label') ?? ''}`
-  return /性价比模式|value\s*mode|value-mode/i.test(label)
+  return PRESET_MATCH.test(label)
 }
 
 function errorText(reason: unknown): string {
   if (reason instanceof Error && reason.message.trim()) return reason.message.trim()
   if (typeof reason === 'string' && reason.trim()) return reason.trim()
-  return '性价比模式自动开启失败，请打开设置重试。'
+  return '价值路由自动开启失败，请打开设置重试。'
 }
 
 /**
- * The host's blank-session agent-preset seat is a single root slot owned by
- * the official UI. Keep that selector intact and add the setup guide as a
- * document-level surface that follows the selector's rendered state.
+ * 官方空白会话预设座位是官方 UI 独占的 single root slot。保留该选择器不动，
+ * 把配置引导作为跟随其渲染状态的文档级附加面挂载。
  */
-function mountHeroOnboarding({ scope, defaultModelScope, onChange, fetchModels }: HeroOnboardingMountOptions): () => void {
+function mountHeroOnboarding({ scope, onChange, fetchModels }: HeroOnboardingMountOptions): () => void {
   if (typeof document === 'undefined' || typeof MutationObserver === 'undefined' || !document.body) return () => {}
 
   const container = document.createElement('div')
-  container.dataset.dshValueModeHeroOnboardingRoot = ''
+  container.dataset.dshValueRouterHeroOnboardingRoot = ''
   document.body.appendChild(container)
   let root: Root | undefined = createRoot(container)
-  let preset: 'value-mode' | 'other' | undefined
+  let preset: 'value-router' | 'other' | undefined
   let open = false
   let dismissed = false
   let enableRequested = false
   let setupError: string | null = null
   let scanQueued = false
 
+  const configuredNow = (): boolean => isCompleteModelRoute((scope.getSnapshot().value ?? {}).executor)
+
   const render = (): void => {
-    root?.render(open ? createElement(ValueModeHeroOnboarding, {
+    root?.render(open ? createElement(ValueRouterHeroOnboarding, {
       config: scope.getSnapshot().value ?? {},
       settingsScope: scope,
-      defaultModelScope,
       onChange,
       fetchModels,
       initialError: setupError,
@@ -126,20 +133,20 @@ function mountHeroOnboarding({ scope, defaultModelScope, onChange, fetchModels }
     enableRequested = true
     void Promise.resolve()
       .then(() => onChange({ enabled: true }))
-      .then(() => reportValueModeTelemetry({ kind: 'state', state: 'enabled', source: 'auto' }))
+      .then(() => reportValueRouterTelemetry({ kind: 'state', state: 'enabled', source: 'auto' }))
       .catch((reason) => {
         enableRequested = false
         setupError = errorText(reason)
-        reportValueModeTelemetry({ kind: 'state', state: 'failed', source: 'auto' })
+        reportValueRouterTelemetry({ kind: 'state', state: 'failed', source: 'auto' })
         open = true
         dismissed = false
         render()
       })
   }
 
-  const syncPreset = (next: 'value-mode' | 'other'): void => {
-    const entered = preset !== 'value-mode' && next === 'value-mode'
-    if (next !== 'value-mode') {
+  const syncPreset = (next: 'value-router' | 'other'): void => {
+    const entered = preset !== 'value-router' && next === 'value-router'
+    if (next !== 'value-router') {
       preset = next
       open = false
       dismissed = false
@@ -154,22 +161,22 @@ function mountHeroOnboarding({ scope, defaultModelScope, onChange, fetchModels }
       dismissed = false
       setupError = null
       enableRequested = false
-      reportValueModeTelemetry({
+      reportValueRouterTelemetry({
         kind: 'entry',
         source: 'hero',
-        configured: hasExplicitModelRoutes(scope.getSnapshot().value ?? {}),
-      }, 'value-mode-entry')
+        configured: configuredNow(),
+      }, 'value-router-entry')
     }
     if (dismissed || open) return
 
     const config = scope.getSnapshot().value ?? {}
-    if (hasExplicitModelRoutes(config)) {
+    if (isCompleteModelRoute(config.executor)) {
       if (config.enabled !== true) enableConfiguredMode()
       return
     }
 
     open = true
-    reportValueModeTelemetry({ kind: 'onboarding', outcome: 'shown', surface: 'hero' }, 'value-mode-onboarding-shown:hero')
+    reportValueRouterTelemetry({ kind: 'onboarding', outcome: 'shown', surface: 'hero' }, 'value-router-onboarding-shown:hero')
     render()
   }
 
@@ -177,18 +184,17 @@ function mountHeroOnboarding({ scope, defaultModelScope, onChange, fetchModels }
     scanQueued = false
     const button = heroPresetButton()
     if (!button) return
-    syncPreset(isValueModeHeroButton(button) ? 'value-mode' : 'other')
+    syncPreset(isValueRouterHeroButton(button) ? 'value-router' : 'other')
   }
 
   const onPresetMenuClick = (event: MouseEvent): void => {
     const target = event.target as HTMLElement | null
     const item = target?.closest<HTMLElement>('[role="menuitem"]')
-    if (!item || !/性价比模式|value\s*mode|value-mode/i.test(item.textContent ?? '')) return
-    // Selecting the already-staged preset is still an explicit request to
-    // continue setup after the user dismissed the guide with Esc/outside.
+    if (!item || !PRESET_MATCH.test(item.textContent ?? '')) return
+    // 再次选择已经选中的预设，本身就是「我关掉引导后仍要继续配置」的明确意图。
     dismissed = false
     setupError = null
-    syncPreset('value-mode')
+    syncPreset('value-router')
   }
 
   const observer = new MutationObserver(() => {
@@ -216,50 +222,38 @@ function mountHeroOnboarding({ scope, defaultModelScope, onChange, fetchModels }
 }
 
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register('value-mode', { zh, en }), 'value-mode: locales')
+  ctx.effect(() => ctx.locale.register('value-router', { zh, en }), 'value-router: locales')
 
   const compatibilityBinder = (ctx.get as (name: string) => unknown)('webUiSettings')
   const binder = isSettingsBinderFace(compatibilityBinder) ? compatibilityBinder : ctx.settingsScope
-  const scope = binder.bind<ValueModeConfig>({ namespace: VALUE_MODE_SETTINGS_NAMESPACE as string })
-  const defaultModelScope = binder.bind<ModelRouteSelection>({ namespace: 'agent-default-model' })
+  const scope = binder.bind<ValueRouterConfig>({ namespace: VALUE_ROUTER_SETTINGS_NAMESPACE as string })
 
-  const fetchModels = createModelCatalogLoader(ctx, ctx.locale.bind('value-mode'))
-
-  const onChange = createValueModeSettingsWriter(scope, ctx.locale.bind('value-mode'))
+  const fetchModels = createModelCatalogLoader(ctx, ctx.locale.bind('value-router'))
+  const onChange = createValueRouterSettingsWriter(scope, ctx.locale.bind('value-router'))
 
   ctx.effect(
-    () => mountHeroOnboarding({
-      scope,
-      defaultModelScope: defaultModelScope as ValueModeSettingsScope<ModelRouteSelection>,
-      onChange,
-      fetchModels,
-    }),
-    'value-mode: blank-session onboarding',
+    () => mountHeroOnboarding({ scope, onChange, fetchModels }),
+    'value-router: blank-session onboarding',
   )
 
-  // The Plugins settings section (`设置 -> 插件 -> 插件配置`) dispatches cards by
-  // settings namespace: it only renders `settings.plugin.item` entries whose
-  // `key` matches a Host-served namespace, pairing our card with the
-  // `value-mode` section our Host plugin registers via `installSection`.
+  // 「设置 → 插件 → 插件配置」按设置 namespace 派发卡片：只有 `key` 命中宿主已服务
+  // namespace 的 settings.plugin.item 条目才会渲染，与宿主 installSection 注册的
+  // `value-router` 段配对。
   ctx.slots.inject('settings.plugin.item', () =>
     ctx.slots.register(
       {
         name: 'settings.plugin.item',
-        key: VALUE_MODE_SETTINGS_NAMESPACE,
-        locale: 'value-mode',
-        inject: () => {
-          const snapshot = scope.getSnapshot()
-          const config = snapshot.value ?? {}
-          return {
-            config,
-            settingsScope: scope,
-            defaultModelScope: defaultModelScope as ValueModeSettingsScope<ModelRouteSelection>,
-            onChange,
-            fetchModels,
-          }
-        },
+        key: VALUE_ROUTER_SETTINGS_NAMESPACE,
+        locale: 'value-router',
+        inject: () => ({
+          config: scope.getSnapshot().value ?? {} as ValueRouterConfig,
+          settingsScope: scope,
+          onChange,
+          fetchModels,
+          clientCtx: ctx,
+        }),
       },
-      ValueModePluginSettingsCard,
+      ValueRouterPluginSettingsCard,
     ),
   )
 
@@ -267,22 +261,17 @@ export function apply(ctx: ClientContext): void {
     ctx.slots.register(
       {
         name: 'conversation.session.header.actions',
-        id: 'value-mode-status',
+        id: 'value-router-status',
         order: -8,
-        inject: () => {
-          const snapshot = scope.getSnapshot()
-          const config = snapshot.value ?? {}
-          return {
-            config,
-            settingsScope: scope,
-            defaultModelScope: defaultModelScope as ValueModeSettingsScope<ModelRouteSelection>,
-            onChange,
-            fetchModels,
-            clientCtx: ctx,
-          }
-        },
+        inject: () => ({
+          config: scope.getSnapshot().value ?? {} as ValueRouterConfig,
+          settingsScope: scope,
+          onChange,
+          fetchModels,
+          clientCtx: ctx,
+        }),
       },
-      ValueModeHeaderStatus,
+      ValueRouterHeaderStatus,
     ),
   )
 }

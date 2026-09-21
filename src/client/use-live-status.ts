@@ -11,12 +11,46 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionOverrideConfig } from '../core/config.ts'
-import type { ValueRouterStatusSnapshot } from '../core/snapshot.ts'
+import type { ModelRouteSelection, SessionOverrideConfig, ValueRouterScope, ValueRouterStrategy } from '../core/config.ts'
 
 const REMOTE_PACKAGE = '@gjs27/dsh-value-router'
 const REMOTE_TYPES = `${REMOTE_PACKAGE}/types`
 const REMOTE_SERVICE = 'valueRouterStatus'
+
+/**
+ * 只读状态快照的浏览器侧视图（src/core/snapshot.ts 的线上形状镜像）。
+ *
+ * tsconfig.client.json 只收录 src/client/** 与 src/core/**，而 core/snapshot.ts
+ * 的类型引用了 src/bridge/**，因此这里保留一份结构性镜像，避免客户端工程
+ * 越过自己的文件边界。
+ */
+export interface ValueRouterStatusView {
+  enabled: boolean
+  scope: ValueRouterScope
+  strategy: ValueRouterStrategy
+  executor: ModelRouteSelection
+  executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
+  executorReason?: string
+  executorCallsTotal: number
+  bridgeDelegationsTotal: number
+  bridgeEnabled: boolean
+  autoDelegate: boolean
+  bridgeStatus: 'up' | 'down' | 'unknown'
+  bridgeCheckedAt?: number
+  bridgeDetail?: string
+  delegating: boolean
+  lastTaskDelegations: number
+  maxDelegationsPerTask: number
+  delegationsTotal: number
+  bridgeTokensTotal: { promptTokens: number; completionTokens: number; total: number }
+  savedTokensTotal: number
+  estimateOnlyCount: number
+  batch?: { batchId: string; done: number; total: number; running: boolean }
+  lastOutcome: 'ok' | 'fail' | 'none'
+  lastMessage?: string
+  lastError?: string
+  availableModels?: string[]
+}
 
 /** 会话计量线上形状（src/status-controller.ts 的 SessionMetricsWire 镜像）。 */
 export interface ValueRouterSessionMetrics {
@@ -138,7 +172,7 @@ function asRoute(value: unknown): { provider: string; model: string; reasoningEf
 }
 
 /** 只保留本插件拥有的最小数据对象，不持有任何宿主对象引用。 */
-function asStatusSnapshot(value: unknown): ValueRouterStatusSnapshot | undefined {
+function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
   if (typeof raw.enabled !== 'boolean' || typeof raw.strategy !== 'string') return undefined
@@ -230,10 +264,25 @@ function asSessionMetrics(value: unknown): ValueRouterSessionMetrics | undefined
 // —— Hooks ——
 
 /**
+ * 轮询结果与上一次逐字段相同的比较。
+ *
+ * 归一化函数每次都构造新对象，若直接 setState 会让订阅组件每 4~5 秒无谓重渲染一次；
+ * 两个载荷都是固定键序的小型纯数据对象，序列化比较既便宜又准确。
+ */
+function unchanged(previous: unknown, next: unknown): boolean {
+  if (previous === undefined) return false
+  try {
+    return JSON.stringify(previous) === JSON.stringify(next)
+  } catch {
+    return false
+  }
+}
+
+/**
  * 订阅宿主只读状态快照（顶栏气泡 / 设置卡打开时轮询；关闭即停）。
  */
-export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueRouterStatusSnapshot | undefined {
-  const [status, setStatus] = useState<ValueRouterStatusSnapshot | undefined>(undefined)
+export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueRouterStatusView | undefined {
+  const [status, setStatus] = useState<ValueRouterStatusView | undefined>(undefined)
   const faceRef = useRef<ValueRouterRemoteFace | null>(null)
 
   useEffect(() => {
@@ -246,7 +295,7 @@ export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueR
         const raw = await face.status({})
         if (disposed) return
         const parsed = asStatusSnapshot(unwrapEnvelope(raw))
-        if (parsed) setStatus(parsed)
+        if (parsed) setStatus((previous) => (unchanged(previous, parsed) ? previous : parsed))
       } catch {
         // 通道抖动时保持旧值，下次轮询再试。
       }
@@ -291,7 +340,7 @@ export function useLiveSessionMetrics(
         const raw = await face.sessionMetrics({ sessionId })
         if (disposed) return
         const parsed = asSessionMetrics(unwrapEnvelope(raw))
-        if (parsed) setMetrics(parsed)
+        if (parsed) setMetrics((previous) => (unchanged(previous, parsed) ? previous : parsed))
       } catch {
         // 保持旧值。
       }

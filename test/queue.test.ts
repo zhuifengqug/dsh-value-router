@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { test as registerTest } from 'node:test'
 import {
   BatchQueue,
   type BatchItemInput,
@@ -18,23 +19,12 @@ import {
 
 // ─── 测试基础设施 ───
 
-let passed = 0
-let failed = 0
-
-async function test(
-  name: string,
-  fn: () => void | Promise<void>,
-): Promise<void> {
-  try {
-    await fn()
-    passed++
-    console.log(`  ✓ ${name}`)
-  } catch (err) {
-    failed++
-    console.error(`  ✗ ${name}`)
-    const msg = err instanceof Error ? err.message : String(err)
-    console.error(`    ${msg}`)
-  }
+/**
+ * 测试注册：交给测试框架执行（vitest 或 node:test，见 test/node-test-shim.ts）。
+ * 返回 void，调用点的 `await test(...)` 因此不会与收集阶段互相等待。
+ */
+function test(name: string, fn: () => void | Promise<void>): void {
+  registerTest(name, fn)
 }
 
 /** 创建可手动 resolve 的 Promise。 */
@@ -78,7 +68,7 @@ async function main() {
   console.log('queue.test.ts\n')
 
   // ① submit 立即返回，报告 accepted / rejected 及原因
-  await test('submit returns immediately with accepted/rejected', () => {
+  test('submit returns immediately with accepted/rejected', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       // 永不 resolve → 验证 submit 不等结果
@@ -94,7 +84,7 @@ async function main() {
   })
 
   // ② 空问题被拒
-  await test('empty / whitespace question rejected', () => {
+  test('empty / whitespace question rejected', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -111,7 +101,7 @@ async function main() {
   })
 
   // ③ 超过 maxItems
-  await test('over-limit items rejected', () => {
+  test('over-limit items rejected', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -132,7 +122,7 @@ async function main() {
   })
 
   // ④ 同批内重复问题
-  await test('duplicate question in same batch rejected', () => {
+  test('duplicate question in same batch rejected', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -153,7 +143,7 @@ async function main() {
   })
 
   // ⑤ concurrency=1 严格顺序
-  await test('strict ordering with concurrency 1', async () => {
+  test('strict ordering with concurrency 1', async () => {
     const callOrder: number[] = []
 
     const queue = new BatchQueue({
@@ -176,7 +166,7 @@ async function main() {
   })
 
   // ⑥ concurrency > 1 真并发（用 deferred 观察）
-  await test('concurrency > 1 dispatches in parallel', async () => {
+  test('concurrency > 1 dispatches in parallel', async () => {
     const deferreds: ReturnType<typeof deferred<{ injectedText: string; usage: BatchUsageTotals }>>[] = []
 
     const queue = new BatchQueue({
@@ -211,7 +201,7 @@ async function main() {
   })
 
   // ⑦ 单条失败不阻塞后续
-  await test('one failing item does not block the rest', async () => {
+  test('one failing item does not block the rest', async () => {
     const completed: string[] = []
 
     const queue = new BatchQueue({
@@ -243,7 +233,7 @@ async function main() {
   })
 
   // ⑧ usageTotals 累加 + estimateOnly 传播
-  await test('usageTotals accumulates and estimateOnly propagates', async () => {
+  test('usageTotals accumulates and estimateOnly propagates', async () => {
     const usage1: BatchUsageTotals = { promptTokens: 100, completionTokens: 200, total: 300, estimateOnly: false }
     const usage2: BatchUsageTotals = { promptTokens: 50, completionTokens: 80, total: 130, estimateOnly: true }
     const usage3: BatchUsageTotals = { promptTokens: 30, completionTokens: 40, total: 70, estimateOnly: false }
@@ -271,7 +261,7 @@ async function main() {
   })
 
   // ⑨ releaseTask 清理记录、pending/running 标记失败
-  await test('releaseTask clears records and fails stragglers', async () => {
+  test('releaseTask clears records and fails stragglers', async () => {
     const deferreds: ReturnType<typeof deferred<{ injectedText: string; usage: BatchUsageTotals }>>[] = []
 
     const queue = new BatchQueue({
@@ -306,7 +296,7 @@ async function main() {
   })
 
   // ⑩ batchId 唯一
-  await test('batchId uniqueness', () => {
+  test('batchId uniqueness', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -323,7 +313,7 @@ async function main() {
   })
 
   // ⑪ snapshot 返回深拷贝，外部修改不影响内部
-  await test('snapshot returns a defensive copy', async () => {
+  test('snapshot returns a defensive copy', async () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -356,7 +346,7 @@ async function main() {
   })
 
   // ⑫ dispose 后 submit 返回空 accepted
-  await test('dispose rejects all further submits', () => {
+  test('dispose rejects all further submits', () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => okResult(),
@@ -372,7 +362,7 @@ async function main() {
   })
 
   // ⑬ runItem reject（非 throw）也被正确捕获
-  await test('runItem rejection is caught as failure', async () => {
+  test('runItem rejection is caught as failure', async () => {
     const queue = new BatchQueue({
       getConcurrency: () => 1,
       runItem: async () => {
@@ -392,7 +382,7 @@ async function main() {
   })
 
   // ⑭ failed item 不贡献 usage
-  await test('failed items contribute nothing to usageTotals', async () => {
+  test('failed items contribute nothing to usageTotals', async () => {
     let callIdx = 0
     const queue = new BatchQueue({
       getConcurrency: () => 1,
@@ -418,7 +408,7 @@ async function main() {
   })
 
   // ⑮ 条目 taskKey 等于 submit 传入的键，runItem 回调也能拿到
-  await test('items carry taskKey from submit; runItem receives it', async () => {
+  test('items carry taskKey from submit; runItem receives it', async () => {
     const seenTaskKeys: string[] = []
 
     const queue = new BatchQueue({
@@ -446,7 +436,7 @@ async function main() {
   })
 
   // ⑯ releaseTask 只清理对应任务，不影响其它任务
-  await test('releaseTask only affects the specified taskKey', async () => {
+  test('releaseTask only affects the specified taskKey', async () => {
     const deferreds: ReturnType<typeof deferred<{ injectedText: string; usage: BatchUsageTotals }>>[] = []
 
     const queue = new BatchQueue({
@@ -494,7 +484,7 @@ async function main() {
   })
 
   // ⑰ model 字段透传：带 model 的条目传到 runItem，不带的为 undefined
-  await test('model field is passed through to runItem; absent = undefined', async () => {
+  test('model field is passed through to runItem; absent = undefined', async () => {
     const seen: (string | undefined)[] = []
 
     const queue = new BatchQueue({
@@ -523,12 +513,7 @@ async function main() {
     queue.dispose()
   })
 
-  // ─── 汇总 ───
-  console.log(`\n  ${passed} passed, ${failed} failed`)
-  if (failed > 0) process.exit(1)
 }
 
-main().catch((err) => {
-  console.error('测试运行器崩溃:', err)
-  process.exit(1)
-})
+// 同步注册全部用例（不 await：收集阶段必须在本模块求值内完成）。
+main()

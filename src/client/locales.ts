@@ -2,7 +2,7 @@
  * 价值路由（Value Router）浏览器侧文案。
  *
  * 命名空间 'value-router' 与宿主设置 namespace 同名。中文为主、英文为兜底；
- * 所有 expert（专家主控）相关文案已随宿主能力删除而移除。
+ * 主模型永不被插件接管，因此不存在任何「主控模型」相关文案。
  */
 
 export const zh = {

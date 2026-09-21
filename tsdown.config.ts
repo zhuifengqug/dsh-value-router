@@ -20,6 +20,10 @@ const PLUGIN_ID = '@gjs27/dsh-value-router'
 /** 把 *.module.css 编译成「注入 <style> + 导出类名映射」的 JS 模块。 */
 function cssModulesInline() {
   const PREFIX = '\0dsh-css-module:'
+  // 解析后的 id 追加 `?dsh-style`：tsdown 0.22 在未安装 @tsdown/css 时会注册
+  // css-guard 插件，对任何以 `.css` 结尾的模块 id 无条件报错；带查询串即可绕过，
+  // 同时保留 `source.endsWith('.module.css')` 的识别条件。
+  const SUFFIX = '?dsh-style'
   return {
     name: 'dsh-css-modules-inline',
     resolveId(source: string, importer?: string) {
@@ -27,11 +31,11 @@ function cssModulesInline() {
       const abs = isAbsolute(source)
         ? source
         : resolvePath(dirname(importer ?? process.cwd()), source)
-      return PREFIX + abs
+      return PREFIX + abs + SUFFIX
     },
     async load(id: string) {
       if (!id.startsWith(PREFIX)) return null
-      const file = id.slice(PREFIX.length)
+      const file = id.slice(PREFIX.length).replace(SUFFIX, '')
       const source = await readFile(file)
       const { code, exports } = transform({
         filename: file,
@@ -69,7 +73,8 @@ const server = defineConfig({
   outDir: 'lib',
   format: 'esm',
   fixedExtension: false,
-  dts: false,
+  // 声明文件由 tsdown 产出（tsc 只做 --noEmit 类型检查，避免两套工具写同一个 lib）。
+  dts: true,
   clean: true,
   sourcemap: true,
   deps: {

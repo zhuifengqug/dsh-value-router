@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { test } from 'node:test'
 import { resolveConfig, DEFAULT_BRIDGE_CONFIG } from '../src/core/config.ts'
 import type { ResolvedValueRouterConfig, BridgeConfig } from '../src/core/config.ts'
 import { BridgeClient } from '../src/bridge/bridge.ts'
@@ -19,21 +20,12 @@ import type { BridgeChatRequest, BridgeResult, BridgeHealth } from '../src/bridg
 
 // —————————————————————————— 辅助 ——————————————————————————
 
-let passed = 0
-let failed = 0
-
-function check(name: string, fn: () => void | Promise<void>) {
-  return (async () => {
-    try {
-      await fn()
-      passed++
-      console.log(`  ✓ ${name}`)
-    } catch (err: unknown) {
-      failed++
-      console.error(`  ✗ ${name}`)
-      console.error(`    ${err instanceof Error ? err.message : String(err)}`)
-    }
-  })()
+/**
+ * 测试注册：交给测试框架执行（vitest 或 node:test，见 test/node-test-shim.ts）。
+ * 刻意返回 void——若返回测试 promise，顶层 `await check(...)` 会与收集阶段互相等待。
+ */
+function check(name: string, fn: () => void | Promise<void>): void {
+  test(name, fn)
 }
 
 /** 构造一个可注入 fetchImpl 的配置 getter（经 resolveConfig 归一化）。 */
@@ -951,10 +943,4 @@ await check('apiKey in hint is sanitized', async () => {
   assert.match(r.reason, /credential_expired/, 'code 应保留')
 })
 
-// ———————————————————— 汇总 ————————————————————
 
-console.log('')
-console.log(`bridge.test.ts: ${passed} passed, ${failed} failed`)
-if (failed > 0) {
-  process.exit(1)
-}

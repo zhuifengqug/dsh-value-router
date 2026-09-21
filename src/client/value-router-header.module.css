@@ -228,22 +228,19 @@
 }
 
 .popoverHeader,
-.historyToggle,
 .actionRow,
 .actionStack {
   min-width: 0;
 }
 
 .popoverHeader,
-.historyToggle,
 .actionRow {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.popoverHeader,
-.historyToggle {
+.popoverHeader {
   justify-content: space-between;
 }
 
@@ -263,22 +260,6 @@
   min-width: 0;
   padding: 4px 6px;
   font-size: 11px;
-}
-
-.historyToggle {
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: #93c5fd;
-  font: inherit;
-  font-size: 11px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.historyTime {
-  color: #9ca3af;
 }
 
 .savingsValue {

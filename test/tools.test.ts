@@ -15,6 +15,7 @@
  * 不依赖任何真实服务，全 mock bridge。
  */
 import assert from 'node:assert/strict'
+import { test as registerTest } from 'node:test'
 
 import { createAskTool, type DelegationRuntime } from '../src/tools/ask.ts'
 import { createBatchTool, createBatchResultTool } from '../src/tools/batch.ts'
@@ -169,26 +170,17 @@ function makeRuntime(
 
 // —————————————————————————— 测试 ——————————————————————————
 
-let passed = 0
-let failed = 0
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<void> {
-  try {
-    await fn()
-    passed++
-    console.log(`  ✓ ${name}`)
-  } catch (err: unknown) {
-    failed++
-    console.error(`  ✗ ${name}`)
-    console.error(`    ${err instanceof Error ? err.message : String(err)}`)
-  }
+/**
+ * 测试注册：交给测试框架执行（vitest 或 node:test，见 test/node-test-shim.ts）。
+ * 返回 void，调用点的 `await runTest(...)` 因此不会与收集阶段互相等待。
+ */
+function runTest(name: string, fn: () => Promise<void>): void {
+  registerTest(name, fn)
 }
 
-async function main(): Promise<void> {
-  console.log('tools.test.ts')
-
+function main(): void {
   // ─── ask 成功 ───
-  await runTest('ask: 成功时 injectedText 含来源标记，usage 上报，remainingDelegations 递减', async () => {
+  runTest('ask: 成功时 injectedText 含来源标记，usage 上报，remainingDelegations 递减', async () => {
     const { rt, coordinator, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const askDef = createAskTool(rt)
     const result = await callExec(askDef, {
@@ -213,7 +205,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask 指定模型：model 透传到桥，来源标记按实际模型 ───
-  await runTest('ask: model=GLM-5 透传到桥，injectedText 含 [来自 GLM协作结果] 不含 DeepSeek', async () => {
+  runTest('ask: model=GLM-5 透传到桥，injectedText 含 [来自 GLM协作结果] 不含 DeepSeek', async () => {
     const glmAnswer = okAnswer({ model: 'GLM-5' })
     const { rt, fakeBridge, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } }, glmAnswer)
     const fb = fakeBridge as unknown as FakeBridgeClient
@@ -235,7 +227,7 @@ async function main(): Promise<void> {
   })
 
   // ─── 默认模型仍标 DeepSeek ───
-  await runTest('ask: 默认模型下 injectedText 仍含 [来自 DeepSeek 网页端协作结果]', async () => {
+  runTest('ask: 默认模型下 injectedText 仍含 [来自 DeepSeek 网页端协作结果]', async () => {
     const { rt, fakeBridge, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const fb = fakeBridge as unknown as FakeBridgeClient
     const askDef = createAskTool(rt)
@@ -252,7 +244,7 @@ async function main(): Promise<void> {
   })
 
   // ─── batch item 带 model ───
-  await runTest('batch: item 带 model 时桥收到对应 model', async () => {
+  runTest('batch: item 带 model 时桥收到对应 model', async () => {
     const qwenAnswer = okAnswer({ model: 'Qwen3.7-Max' })
     const { rt, fakeBridge, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50, maxDelegationsPerTask: 10 } }, qwenAnswer)
     const fb = fakeBridge as unknown as FakeBridgeClient
@@ -274,7 +266,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask 拒绝：黑名单 ───
-  await runTest('ask: 黑名单任务类型被拒绝，不消耗委派次数', async () => {
+  runTest('ask: 黑名单任务类型被拒绝，不消耗委派次数', async () => {
     const { rt, coordinator, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const askDef = createAskTool(rt)
     const result = await callExec(askDef, {
@@ -289,7 +281,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask 拒绝：凭据 ───
-  await runTest('ask: 含凭据被拒绝，不消耗委派次数', async () => {
+  runTest('ask: 含凭据被拒绝，不消耗委派次数', async () => {
     const { rt, coordinator, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const askDef = createAskTool(rt)
     const result = await callExec(askDef, {
@@ -303,7 +295,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask bridge down → degraded ───
-  await runTest('ask: bridge down → degraded:true + 可操作中文原因 + 释放锁', async () => {
+  runTest('ask: bridge down → degraded:true + 可操作中文原因 + 释放锁', async () => {
     const bridgeDown: BridgeResult = { ok: false, kind: 'unreachable', reason: '无法连接桥接服务' }
     const { rt, coordinator, status, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } }, bridgeDown)
     status.noteBridgeHealth({ status: 'up', checkedAt: Date.now() })
@@ -331,7 +323,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask refuse → coordinator 不触碰 + degraded=false（策略拒绝） ───
-  await runTest('ask: 策略拒绝时不触碰 coordinator，degraded=false', async () => {
+  runTest('ask: 策略拒绝时不触碰 coordinator，degraded=false', async () => {
     const { rt, coordinator, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const askDef = createAskTool(rt)
     const result = await callExec(askDef, { taskType: 'code-modification', question: 'Refactor this function.' }, exec)
@@ -342,7 +334,7 @@ async function main(): Promise<void> {
   })
 
   // ─── ask refuse: 桥 down → 决策拒绝 → degraded=true ───
-  await runTest('ask: 桥 down 导致决策拒绝时 degraded=true，reason 可操作', async () => {
+  runTest('ask: 桥 down 导致决策拒绝时 degraded=true，reason 可操作', async () => {
     const { rt, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     // 模拟探活发现 Chat2API 停掉：桥客户端返回 down
     ;(rt.bridge as unknown as FakeBridgeClient).setHealth({ status: 'down', checkedAt: Date.now(), detail: 'unreachable' })
@@ -359,7 +351,7 @@ async function main(): Promise<void> {
   })
 
   // ─── batch 立即返回 + 逐条拒绝 ───
-  await runTest('batch: 立即返回，含决策拒绝和空问题拒绝', async () => {
+  runTest('batch: 立即返回，含决策拒绝和空问题拒绝', async () => {
     const { rt, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50, maxDelegationsPerTask: 10 } })
     const batchDef = createBatchTool(rt)
     const longCtx = 'We are evaluating options for a public read API: caching semantics, schema evolution, auth patterns, rate limiting, error modeling, payload size over slow networks, and gateway cost. '.repeat(6)
@@ -382,7 +374,7 @@ async function main(): Promise<void> {
   })
 
   // ─── batch + batch_result 收敛 + 进度上报 + 会话键记账 ───
-  await runTest('batch_result: 批次收敛到 done，usageTotals 累加正确，进度上报到状态卡', async () => {
+  runTest('batch_result: 批次收敛到 done，usageTotals 累加正确，进度上报到状态卡', async () => {
     const { rt, coordinator, status, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50, maxDelegationsPerTask: 10 } })
     const batchDef = createBatchTool(rt)
     const resultDef = createBatchResultTool(rt)
@@ -430,7 +422,7 @@ async function main(): Promise<void> {
   })
 
   // ─── unknown batchId ───
-  await runTest('batch_result: 未知 batchId 安全失败', async () => {
+  runTest('batch_result: 未知 batchId 安全失败', async () => {
     const { rt, exec } = makeRuntime()
     const resultDef = createBatchResultTool(rt)
     const result = await callExec(resultDef, { batchId: 'bw-nonexistent' }, exec)
@@ -441,7 +433,7 @@ async function main(): Promise<void> {
   })
 
   // ─── batch 限额预检 ───
-  await runTest('batch: 限额预检在同批次内正确计数', async () => {
+  runTest('batch: 限额预检在同批次内正确计数', async () => {
     const { rt, coordinator, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50, maxDelegationsPerTask: 2 } })
     const askDef = createAskTool(rt)
     const longCtx = 'We are evaluating options for a public read API: caching semantics, schema evolution, auth patterns, rate limiting, error modeling, payload size over slow networks, and gateway cost. '.repeat(6)
@@ -467,7 +459,7 @@ async function main(): Promise<void> {
   })
 
   // ─── 回归守卫：所有工具返回键 ⊆ output.schema 声明键 ───
-  await runTest('回归守卫: ask 成功/失败返回键 ⊆ schema 声明键', async () => {
+  runTest('回归守卫: ask 成功/失败返回键 ⊆ schema 声明键', async () => {
     const { rt, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const askDef = createAskTool(rt)
     const declaredKeys = new Set(Object.keys((askDef as { output?: { schema?: { properties?: Record<string, unknown> } } }).output?.schema?.properties ?? {}))
@@ -487,7 +479,7 @@ async function main(): Promise<void> {
     }
   })
 
-  await runTest('回归守卫: batch 返回键 ⊆ schema 声明键', async () => {
+  runTest('回归守卫: batch 返回键 ⊆ schema 声明键', async () => {
     const { rt, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const batchDef = createBatchTool(rt)
     const declaredKeys = new Set(Object.keys((batchDef as { output?: { schema?: { properties?: Record<string, unknown> } } }).output?.schema?.properties ?? {}))
@@ -498,7 +490,7 @@ async function main(): Promise<void> {
     }
   })
 
-  await runTest('回归守卫: batch_result 成功/失败返回键 ⊆ schema 声明键', async () => {
+  runTest('回归守卫: batch_result 成功/失败返回键 ⊆ schema 声明键', async () => {
     const { rt, exec } = makeRuntime({ tuning: { minEstimatedSavedTokens: 50 } })
     const resultDef = createBatchResultTool(rt)
     const declaredKeys = new Set(Object.keys((resultDef as { output?: { schema?: { properties?: Record<string, unknown> } } }).output?.schema?.properties ?? {}))
@@ -518,9 +510,7 @@ async function main(): Promise<void> {
     }
   })
 
-  // ─── 结果 ───
-  console.log(`\n${passed + failed} tests, ${passed} passed, ${failed} failed`)
-  if (failed > 0) process.exit(1)
 }
 
-void main()
+// 同步注册全部用例（不 await：收集阶段必须在本模块求值内完成）。
+main()
