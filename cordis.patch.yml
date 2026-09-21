@@ -1,0 +1,3 @@
+- insert:
+    - id: value-router
+      name: '@gjs27/dsh-value-router'

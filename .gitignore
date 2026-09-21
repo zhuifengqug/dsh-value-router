@@ -1,0 +1,11 @@
+# 依赖与构建产物
+node_modules/
+lib/
+*.tsbuildinfo
+
+# 本机回滚备份（含 profile package.json 原件等环境相关快照）
+.rollback/
+
+# 编辑器 / 系统噪声
+.DS_Store
+Thumbs.db

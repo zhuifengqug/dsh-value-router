@@ -1,0 +1,103 @@
+/* Single-card shell for the Plugins settings section.
+ * This <li> IS the official-style card: rounded shell, header, divider,
+ * body. The inner ValueModeSettingsCard renders borderless so there is no
+ * double frame. Uses only the semantic tokens the section provides
+ * (dsw-alias-*), same as the official PluginCard. */
+.card {
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-bg-layer-3);
+  border-radius: 16px;
+  list-style: none;
+  transition: border-color 0.16s, background 0.16s;
+}
+
+.card:hover {
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.cardOpen {
+  background: var(--dsw-alias-bg-layer-2);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.header {
+  appearance: none;
+  width: 100%;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.header:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+.headText {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+
+.name {
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.description {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.statusDot {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.statusOn {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.chevron {
+  color: var(--dsw-alias-label-tertiary);
+  flex: none;
+  transition: transform 0.16s;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.body {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  margin: 0 16px;
+  padding: 12px 0 16px;
+}
+
+/* The inner settings form must not draw its own card frame: the <li>
+ * above already is the card. Neutralize only frame properties. */
+.body [data-value-mode-card='true'] {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+}
