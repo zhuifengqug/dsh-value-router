@@ -9,3 +9,6 @@ lib/
 # 编辑器 / 系统噪声
 .DS_Store
 Thumbs.db
+
+# mnemon 运行时状态（插件在本目录生成）
+.mnemon/
