@@ -59,3 +59,15 @@ test('策略文案随档位变化', () => {
   assert.match(powerful, /更强/)
   assert.notEqual(saver, powerful)
 })
+
+test('平衡档给出可执行的派发触发条件，且硬纪律不再否定派发', () => {
+  // 实测事故：原文只说「按需派发子代理」，而硬纪律写着「判断不明确时默认自己处理」，
+  // 两者叠加会让主模型一路自己干完（用户观测：选了预设却一次都没派子代理）。
+  const text = buildSystemPromptGuidance(resolveConfig({ strategy: 'balanced', executor: ENABLED.executor }))
+  assert.match(text, /优先派发子代理/)
+  assert.match(text, /并行/)
+  assert.match(text, /多文件|多目录|文件\/目录/)
+  // 硬纪律要显式限定只约束桥接外发
+  assert.match(text, /只约束桥接外发/)
+  assert.doesNotMatch(text, /判断不明确时默认自己处理/)
+})

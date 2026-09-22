@@ -22,10 +22,22 @@ DSH 会话内的**成本感知协作层**：主模型（用户在预设/会话�
 
 | scope | 生效对象 | 说明 |
 | --- | --- | --- |
-| `preset`（默认） | 仅 `agentPreset === 'value-router'` 的会话 | 插件会把自带预设同步到 `<DSH_HOME>/.agent-presets/value-router`，在模式选择器里显示为「价值路由」 |
+| `preset`（默认） | 仅当前预设为 `value-router` 的会话 | 插件会把自带预设同步到 `<DSH_HOME>/.agent-presets/value-router`，在模式选择器里显示为「价值路由」 |
 | `global` | 所有预设（可用 `excludePresets` 排除） | 提示注入所有会话；所有子代理会话都被路由 |
 
 两种 scope 下都遵守同一条硬约束：**`origin !== 'subagent'` 的会话一律不改写 provider/model**（主会话、用户手动开的会话都不受影响）。
+
+### 「当前预设」怎么判定（踩过坑，勿改回 header）
+
+DSH 里 `session.header.agentPreset` 是**会话创建时**的预设且**不可变**；切换预设走的是 `agent-preset/selected` 事件——`AgentPresets.swap()` 会先 `recompose(agent.ctx)`，再追加该事件推进 `agentPreset` **投影**（见 `dsh-agent-presets/lib/index.js` 的 `agentPresetProjectionDefinition` 注释：*"The creation header names the preset a session STARTED with… Reconstruction reads the `agentPreset` Session projection, never the header"*）。
+
+所以本插件按 **实时组合（`agentPresets.composedPreset(agent.ctx)`）→ 会话投影（`sessionProjections.stateOf(session,'agentPreset')`）→ 创建 header** 的优先级取值（`src/core/routing.ts` 的 `resolveCurrentPreset`）。只读创建 header 会出现「新建 standard 会话 → 切成价值路由」的会话被永久判定为不在范围内：提示段不注入、路由被 `scope` 静默跳过，表现为**选了预设却一次都不派子代理**。
+
+### 使用要点
+
+- **在发第一条消息前选好预设**：DSH 的预设切换在会话首轮之后会被锁死（`agent-preset/locked`），所以新会话请在模式选择器里先选「价值路由」，再发消息。
+- 想省事就把默认预设设成它：设置里的「默认模式」（对应 `settings.yaml` 的 `agent-presets.default`）改成 `value-router`，新会话直接就在该模式下。
+- 与内置的 `subagent-model-selection`（会话级子代理模型白名单）**语义重叠**：本插件会在 `agent/request` 里把子代理会话改写成配置的 executor，覆盖调用时选的模型。若两者同时启用，建议把 executor 也加进那个白名单，避免两套策略互相打架。
 
 ## 2. 三档策略（strategy）
 

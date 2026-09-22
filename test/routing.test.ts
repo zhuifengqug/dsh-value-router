@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { decideSubagentRoute, pickOverride } from '../src/core/routing.ts'
+import { decideSubagentRoute, pickOverride, resolveCurrentPreset } from '../src/core/routing.ts'
 import type { ValueRouterConfig } from '../src/core/config.ts'
 
 const EXECUTOR = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
@@ -165,3 +165,55 @@ test('pickOverride：无覆写时回落到全局配置', () => {
   assert.equal(pickOverride(undefined, { enabled: true }).source, 'parent')
   assert.equal(pickOverride({ enabled: true }, { enabled: false }).source, 'session')
 })
+
+// —— 会话当前预设的解析（实测事故回归：header 是创建时的值，切换预设不改它）——
+
+test('resolveCurrentPreset：实时组合优先于会话投影优先于创建 header', () => {
+  assert.equal(
+    resolveCurrentPreset({ composed: 'value-router', projection: 'standard', header: 'standard' }),
+    'value-router',
+  )
+  assert.equal(
+    resolveCurrentPreset({ composed: undefined, projection: 'value-router', header: 'standard' }),
+    'value-router',
+  )
+  assert.equal(
+    resolveCurrentPreset({ composed: null, projection: null, header: 'value-router' }),
+    'value-router',
+  )
+})
+
+test('resolveCurrentPreset：三者都缺失/为空时返回 undefined', () => {
+  assert.equal(resolveCurrentPreset({}), undefined)
+  assert.equal(resolveCurrentPreset({ composed: undefined, projection: null, header: '' }), undefined)
+})
+
+test('回归：会话以 standard 创建、随即切成 value-router，scope=preset 必须仍然生效', () => {
+  // 事故现场：header.agentPreset === 'standard'（创建时的值，不可变），
+  // 而实时组合/投影都已经是 value-router。按 header 判定会一直「不在生效范围」，
+  // 表现为「选了价值路由预设却一次都不派子代理」。
+  const resolved = resolveCurrentPreset({
+    composed: 'value-router',
+    projection: 'value-router',
+    header: 'standard',
+  })
+  assert.equal(resolved, 'value-router')
+
+  const decision = decideSubagentRoute({
+    globalConfig: baseConfig(),
+    agentPreset: resolved,
+    origin: 'subagent',
+    executorAvailable: true,
+  })
+  assert.equal(decision.route, true, '按当前预设判定应路由')
+
+  // 反证：如果仍然拿创建 header，就会被 scope 门静默跳过
+  const wrong = decideSubagentRoute({
+    globalConfig: baseConfig(),
+    agentPreset: 'standard',
+    origin: 'subagent',
+    executorAvailable: true,
+  })
+  assert.deepEqual(wrong, { route: false, reason: 'scope' })
+})
+

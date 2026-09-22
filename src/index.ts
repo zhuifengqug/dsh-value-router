@@ -44,7 +44,7 @@ import { DelegationCoordinator } from './bridge/limits.ts'
 import { StatusTracker, type DelegationStatusSnapshot } from './bridge/status.ts'
 import { buildSystemPromptGuidance, VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER } from './core/policy.ts'
 import { checkRouteAvailability, type ExecutorHealth } from './core/model-selection.ts'
-import { decideSubagentRoute, routeSkipText } from './core/routing.ts'
+import { decideSubagentRoute, resolveCurrentPreset, routeSkipText } from './core/routing.ts'
 import { emitValueRouterRuntimeTelemetry, routeErrorType, routeParameters, type RouteParameters } from './core/runtime-telemetry.ts'
 import { valueRouterState, type SessionMetricsSnapshot } from './core/state.ts'
 import type { ValueRouterStatusSnapshot } from './core/snapshot.ts'
@@ -103,7 +103,6 @@ function sessionIdOf(payload: unknown): string | undefined {
   if (typeof fromHeader === 'string' && fromHeader) return fromHeader
   return typeof agent?.id === 'string' && agent.id ? agent.id : undefined
 }
-
 export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = {}): void | Promise<void> {
   // 先同步预设，保证模式在启动后即可被选择（与设置开关无关）。
   syncBundledPreset(ctx)
@@ -121,6 +120,39 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   let currentSource: () => Partial<ValueRouterConfig> = () => initialConfig
 
   const getConfig = (): ResolvedValueRouterConfig => resolveConfig(currentSource())
+
+  /**
+   * 读取 agent **当前**所在的预设 id。
+   *
+   * 不能只看 `session.header.agentPreset`：那是会话「创建时」的预设且不可变，
+   * 用户切换预设只追加 `agent-preset/selected` 事件并重组合 agent ctx。
+   * 详见 core/routing.ts 的 resolveCurrentPreset 注释（实测事故复盘）。
+   */
+  const currentPresetOf = (agent: unknown): string | undefined => {
+    const value = agent as
+      | { ctx?: Context; session?: { header?: { agentPreset?: string | null } } }
+      | undefined
+    let composed: string | null | undefined
+    try {
+      const presets = ctx.get('agentPresets' as never) as
+        | { composedPreset?: (agentCtx: Context) => string | undefined }
+        | undefined
+      if (value?.ctx !== undefined && typeof presets?.composedPreset === 'function') {
+        composed = presets.composedPreset(value.ctx) ?? null
+      }
+    } catch { /* 服务缺失 → 回落到投影 */ }
+    let projection: string | null | undefined
+    try {
+      const projections = ctx.get('sessionProjections' as never) as
+        | { stateOf?: (session: unknown, key: string) => unknown }
+        | undefined
+      if (value?.session !== undefined && typeof projections?.stateOf === 'function') {
+        const state = projections.stateOf(value.session, 'agentPreset')
+        projection = typeof state === 'string' ? state : null
+      }
+    } catch { /* 服务缺失 → 回落到 header */ }
+    return resolveCurrentPreset({ composed, projection, header: value?.session?.header?.agentPreset })
+  }
 
   // —— requestId 自增序号 ——
   let seq = 0
@@ -244,12 +276,17 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   ctx.systemPrompt.section({
     name: VALUE_ROUTER_SECTION_NAME,
     order: VALUE_ROUTER_SECTION_ORDER,
-    text: (assembly: { agent?: { session?: { header?: { agentPreset?: string; origin?: string; id?: string; parentSession?: string } } } }) => {
+    text: (assembly: {
+      agent?: {
+        ctx?: Context
+        session?: { header?: { agentPreset?: string; origin?: string; id?: string; parentSession?: string } }
+      }
+    }) => {
       const header = assembly?.agent?.session?.header
       const globalConfig = currentSource()
       const base = resolveConfig(globalConfig)
       if (!base.enabled) return ''
-      if (!scopeAllowsPreset(base, header?.agentPreset)) return ''
+      if (!scopeAllowsPreset(base, currentPresetOf(assembly?.agent))) return ''
       const sessionId = typeof header?.id === 'string' ? header.id : undefined
       const override = sessionOverrideFor(sessionId, header?.parentSession)
       const effective = resolveEffectiveConfig(globalConfig, override)
@@ -306,9 +343,10 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
 
     const globalConfig = currentSource()
     const base = resolveConfig(globalConfig)
+    const agentPreset = currentPresetOf(payload.agent)
     // 廉价预检：不启用 / 不在生效范围 / 不是子代理 → 直接放行，不触碰 llm。
     if (!base.enabled) return resolved
-    if (!scopeAllowsPreset(base, header?.agentPreset)) return resolved
+    if (!scopeAllowsPreset(base, agentPreset)) return resolved
     if (header?.origin !== 'subagent') return resolved
 
     const override = sessionOverrideFor(sessionId, parentSessionId)
@@ -318,7 +356,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     const available = (await checkRouteAvailability(ctx.llm, effective.executor)) === 'ready'
     const decision = decideSubagentRoute({
       globalConfig,
-      agentPreset: header?.agentPreset,
+      agentPreset,
       origin: header?.origin,
       ...(sessionId !== undefined ? { sessionOverride: valueRouterState.getSessionOverride(sessionId) } : {}),
       ...(parentSessionId !== undefined ? { parentOverride: valueRouterState.getSessionOverride(parentSessionId) } : {}),

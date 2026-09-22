@@ -23,13 +23,40 @@ export type RouteSkipReason =
   | 'executor-incomplete'
   | 'executor-unavailable'
 
+/**
+ * 解析会话**当前**所在的预设 id。
+ *
+ * 为什么不能只看 `session.header.agentPreset`：DSH 的注释明确写着 header 是
+ * 「会话**开始**时所用的预设」（`dsh-agent-presets/lib/index.js` 的
+ * agentPresetProjectionDefinition 段），且不可变；切换预设走的是
+ * `agent-preset/selected` 事件——`swap()` 会先 `recompose(agent.ctx)`，
+ * 再追加该事件推进 `agentPreset` 投影。
+ *
+ * 实测事故：新建会话时 header 记的是 `standard`，用户随即切成 `value-router`，
+ * 于是按 header 判定「不在生效范围」→ 提示段不注入、子代理路由被 `scope` 跳过，
+ * 表现为「选了价值路由预设却一次都不派子代理」。
+ *
+ * 优先级：实时组合（agent.ctx 的 standing mount，最权威）→ 会话投影（durable 记录）
+ * → 创建 header（兜底旧行为）。三者都可能缺失，返回 undefined。
+ */
+export function resolveCurrentPreset(sources: {
+  composed?: string | null | undefined
+  projection?: string | null | undefined
+  header?: string | null | undefined
+}): string | undefined {
+  for (const value of [sources.composed, sources.projection, sources.header]) {
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
 /** 生效覆写来源。 */
 export type OverrideSource = 'session' | 'parent' | 'global'
 
 export interface RouteDecisionInput {
   /** 全局（设置页）配置原文，可能是旧版本/缺字段。 */
   globalConfig: Partial<ValueRouterConfig> | undefined | null
-  /** 当前会话的预设 id（session.header.agentPreset）。 */
+  /** 当前会话的预设 id（用 resolveCurrentPreset() 解析，勿直接传 session.header.agentPreset）。 */
   agentPreset?: string
   /** 会话来源（session.header.origin）。 */
   origin?: string
