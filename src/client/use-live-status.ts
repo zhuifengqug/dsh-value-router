@@ -18,11 +18,10 @@ const REMOTE_TYPES = `${REMOTE_PACKAGE}/types`
 const REMOTE_SERVICE = 'valueRouterStatus'
 
 /**
- * 只读状态快照的浏览器侧视图（src/core/snapshot.ts 的线上形状镜像）。
+ * 只读状态快照的浏览器侧视图（src/core/snapshot.ts 的线上形状镜像，7 个字段）。
  *
- * tsconfig.client.json 只收录 src/client/** 与 src/core/**，而 core/snapshot.ts
- * 的类型引用了 src/bridge/**，因此这里保留一份结构性镜像，避免客户端工程
- * 越过自己的文件边界。
+ * tsconfig.client.json 只收录 src/client/** 与 src/core/**，这里保留一份结构性
+ * 镜像，避免客户端工程越过自己的文件边界。
  */
 export interface ValueRouterStatusView {
   enabled: boolean
@@ -32,38 +31,11 @@ export interface ValueRouterStatusView {
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
   executorReason?: string
   executorCallsTotal: number
-  bridgeDelegationsTotal: number
-  bridgeEnabled: boolean
-  autoDelegate: boolean
-  bridgeStatus: 'up' | 'down' | 'unknown'
-  bridgeCheckedAt?: number
-  bridgeDetail?: string
-  delegating: boolean
-  lastTaskDelegations: number
-  maxDelegationsPerTask: number
-  delegationsTotal: number
-  bridgeTokensTotal: { promptTokens: number; completionTokens: number; total: number }
-  savedTokensTotal: number
-  estimateOnlyCount: number
-  batch?: { batchId: string; done: number; total: number; running: boolean }
-  lastOutcome: 'ok' | 'fail' | 'none'
-  lastMessage?: string
-  lastError?: string
-  availableModels?: string[]
 }
 
 /** 会话计量线上形状（src/status-controller.ts 的 SessionMetricsWire 镜像）。 */
 export interface ValueRouterSessionMetrics {
   executorCalls: number
-  executorInputTokens: number
-  executorOutputTokens: number
-  bridgeDelegations: number
-  bridgePromptTokens: number
-  bridgeCompletionTokens: number
-  bridgeTotalTokens: number
-  bridgeSavedTokens: number
-  estimateOnlyCount: number
-  executorSharePercent: number
   override: SessionOverrideConfig | null
 }
 
@@ -150,10 +122,6 @@ function num(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
 }
 
-function bool(value: unknown, fallback: boolean): boolean {
-  return typeof value === 'boolean' ? value : fallback
-}
-
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
@@ -176,13 +144,6 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
   if (typeof raw.enabled !== 'boolean' || typeof raw.strategy !== 'string') return undefined
-  const tokens = (typeof raw.bridgeTokensTotal === 'object' && raw.bridgeTokensTotal !== null
-    ? raw.bridgeTokensTotal
-    : {}) as Record<string, unknown>
-  const batchRaw = (typeof raw.batch === 'object' && raw.batch !== null ? raw.batch : undefined) as Record<string, unknown> | undefined
-  const models = Array.isArray(raw.availableModels)
-    ? raw.availableModels.filter((item): item is string => typeof item === 'string')
-    : undefined
   return {
     enabled: raw.enabled,
     scope: oneOf(raw.scope, ['preset', 'global'] as const, 'preset'),
@@ -191,37 +152,6 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
     executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),
     ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),
     executorCallsTotal: num(raw.executorCallsTotal),
-    bridgeDelegationsTotal: num(raw.bridgeDelegationsTotal),
-    bridgeEnabled: bool(raw.bridgeEnabled, false),
-    autoDelegate: bool(raw.autoDelegate, false),
-    bridgeStatus: oneOf(raw.bridgeStatus, ['up', 'down', 'unknown'] as const, 'unknown'),
-    ...(typeof raw.bridgeCheckedAt === 'number' && Number.isFinite(raw.bridgeCheckedAt) ? { bridgeCheckedAt: raw.bridgeCheckedAt } : {}),
-    ...(optionalString(raw.bridgeDetail) !== undefined ? { bridgeDetail: optionalString(raw.bridgeDetail) } : {}),
-    delegating: bool(raw.delegating, false),
-    lastTaskDelegations: num(raw.lastTaskDelegations),
-    maxDelegationsPerTask: num(raw.maxDelegationsPerTask),
-    delegationsTotal: num(raw.delegationsTotal),
-    bridgeTokensTotal: {
-      promptTokens: num(tokens.promptTokens),
-      completionTokens: num(tokens.completionTokens),
-      total: num(tokens.total),
-    },
-    savedTokensTotal: num(raw.savedTokensTotal),
-    estimateOnlyCount: num(raw.estimateOnlyCount),
-    ...(batchRaw !== undefined
-      ? {
-        batch: {
-          batchId: typeof batchRaw.batchId === 'string' ? batchRaw.batchId : '',
-          done: num(batchRaw.done),
-          total: num(batchRaw.total),
-          running: bool(batchRaw.running, false),
-        },
-      }
-      : {}),
-    lastOutcome: oneOf(raw.lastOutcome, ['ok', 'fail', 'none'] as const, 'none'),
-    ...(optionalString(raw.lastMessage) !== undefined ? { lastMessage: optionalString(raw.lastMessage) } : {}),
-    ...(optionalString(raw.lastError) !== undefined ? { lastError: optionalString(raw.lastError) } : {}),
-    ...(models !== undefined ? { availableModels: models } : {}),
   }
 }
 
@@ -245,18 +175,9 @@ function asOverride(value: unknown): SessionOverrideConfig | null {
 function asSessionMetrics(value: unknown): ValueRouterSessionMetrics | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
-  if (typeof raw.executorCalls !== 'number' && typeof raw.bridgeDelegations !== 'number') return undefined
+  if (typeof raw.executorCalls !== 'number') return undefined
   return {
     executorCalls: num(raw.executorCalls),
-    executorInputTokens: num(raw.executorInputTokens),
-    executorOutputTokens: num(raw.executorOutputTokens),
-    bridgeDelegations: num(raw.bridgeDelegations),
-    bridgePromptTokens: num(raw.bridgePromptTokens),
-    bridgeCompletionTokens: num(raw.bridgeCompletionTokens),
-    bridgeTotalTokens: num(raw.bridgeTotalTokens),
-    bridgeSavedTokens: num(raw.bridgeSavedTokens),
-    estimateOnlyCount: num(raw.estimateOnlyCount),
-    executorSharePercent: Math.min(100, Math.max(0, num(raw.executorSharePercent))),
     override: asOverride(raw.override),
   }
 }

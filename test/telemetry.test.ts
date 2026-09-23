@@ -36,14 +36,23 @@ test('routeErrorType 分类', () => {
   assert.equal(routeErrorType(new Error('boom')), 'unknown')
 })
 
-test('未开启 Desktop 指标桥时不写 stdout', () => {
+/**
+ * Desktop 产品指标开关（DSH 平台拥有，src/core/runtime-telemetry.ts 读同一个名字）。
+ *
+ * 这是真实存在的 DSH 环境变量，与已退役的桥接（Chat2API 外发）通道**无关**，
+ * 只是名字里恰好含 BRIDGE，所以这里照实写字面量——测试不该为了迁就检索脚本而
+ * 把变量名拼接起来（那会让后来人以为这个名字有什么特殊之处）。
+ */
+const DESKTOP_METRICS_ENV = 'DSH_DESKTOP_PRODUCT_METRICS_BRIDGE'
+
+test('未开启 Desktop 产品指标开关时不写 stdout', () => {
   const original = (globalThis as { process?: { env?: Record<string, string | undefined>; stdout?: { write: (v: string) => unknown } } }).process
   const writes: string[] = []
   const proc = original as unknown as { env: Record<string, string | undefined>; stdout: { write: (v: string) => unknown } }
-  const savedEnv = proc.env.DSH_DESKTOP_PRODUCT_METRICS_BRIDGE
+  const savedEnv = proc.env[DESKTOP_METRICS_ENV]
   const savedWrite = proc.stdout.write
   try {
-    delete proc.env.DSH_DESKTOP_PRODUCT_METRICS_BRIDGE
+    delete proc.env[DESKTOP_METRICS_ENV]
     proc.stdout.write = (value: string) => { writes.push(value); return true }
     emitValueRouterRuntimeTelemetry({
       event: 'value_router_route',
@@ -52,7 +61,7 @@ test('未开启 Desktop 指标桥时不写 stdout', () => {
     })
     assert.equal(writes.length, 0)
 
-    proc.env.DSH_DESKTOP_PRODUCT_METRICS_BRIDGE = '1'
+    proc.env[DESKTOP_METRICS_ENV] = '1'
     emitValueRouterRuntimeTelemetry({
       event: 'value_router_route',
       timestamp: new Date().toISOString(),
@@ -67,7 +76,7 @@ test('未开启 Desktop 指标桥时不写 stdout', () => {
     assert.equal(JSON.stringify(payload).includes('sessionId'), false)
   } finally {
     proc.stdout.write = savedWrite
-    if (savedEnv === undefined) delete proc.env.DSH_DESKTOP_PRODUCT_METRICS_BRIDGE
-    else proc.env.DSH_DESKTOP_PRODUCT_METRICS_BRIDGE = savedEnv
+    if (savedEnv === undefined) delete proc.env[DESKTOP_METRICS_ENV]
+    else proc.env[DESKTOP_METRICS_ENV] = savedEnv
   }
 })

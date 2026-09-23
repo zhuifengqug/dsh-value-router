@@ -144,7 +144,7 @@ export const ValueRouterHeroOnboarding: React.FC<ValueRouterHeroOnboardingProps>
         </div>
 
         <p className={headerStyles.setupLead}>
-          主模型负责理解、拆解与最终交付，executor 只执行下沉的子任务；无工具的单轮问答可经本地 Chat2API 桥外发。
+          主模型负责理解、拆解与最终交付，executor 只执行下沉的子任务；派发的积极程度由运行策略决定。
         </p>
 
         <div className={headerStyles.setupSteps}>

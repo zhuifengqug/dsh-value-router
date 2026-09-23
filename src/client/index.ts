@@ -3,7 +3,7 @@
  * 价值路由（Value Router）浏览器侧。
  *
  * 三个注册面：
- * - settings.plugin.item → 「插件」设置区的卡片（路由区 + 桥配置区）；
+ * - settings.plugin.item → 「插件」设置区的卡片（路由区）；
  * - conversation.session.header.actions → 顶栏徽章 + 快捷设置气泡（含会话级覆写）；
  * - 文档级附加面 → 空白会话 Hero 上的首次引导（不替换官方预设选择器）。
  *
@@ -40,7 +40,6 @@ export { ValueRouterHeroOnboarding } from './ValueRouterHeroOnboarding.tsx'
 export { ModelPicker } from './ModelPicker.tsx'
 export * from './locales.ts'
 export * from './use-live-status.ts'
-export * from './bridge-models.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {

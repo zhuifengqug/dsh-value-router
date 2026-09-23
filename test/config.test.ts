@@ -1,12 +1,12 @@
 /**
- * 配置归一化测试：安全默认值、策略 → 门控参数映射、tuning 覆盖、会话覆写合并。
+ * 配置归一化测试：安全默认值、生效范围、策略、executor 归一化、
+ * 设置校验（assertConfigValid）、会话覆写合并与清洗。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
   DEFAULT_CONFIG,
-  STRATEGY_TUNING,
   assertConfigValid,
   isCompleteModelRoute,
   normalizeSessionOverride,
@@ -22,74 +22,58 @@ test('resolveConfig(undefined) 返回安全默认值', () => {
   assert.equal(c.scope, 'preset')
   assert.deepEqual(c.excludePresets, [])
   assert.equal(c.strategy, 'balanced')
-  assert.equal(c.maxDepth, 1)
-  assert.equal(c.bridge.baseUrl, 'http://127.0.0.1:8080/v1')
-  assert.equal(c.bridge.trustUsage, 'auto')
-  // 账号安全：桥并发与委派并发恒为 1
-  assert.equal(c.bridge.concurrency, 1)
-  assert.equal(c.maxConcurrentDelegations, 1)
+  assert.deepEqual(c.executor, { provider: '', model: '', reasoningEffort: '' })
+  assert.deepEqual(c, DEFAULT_CONFIG)
 })
 
 test('旧配置缺新增字段仍可加载（逐字段兜底）', () => {
   const c = resolveConfig({ enabled: true, executor: { provider: 'p', model: 'm' } })
   assert.equal(c.scope, 'preset')
   assert.equal(c.strategy, 'balanced')
-  assert.equal(c.bridge.modelMap.plain, DEFAULT_CONFIG.bridge.modelMap.plain)
-  assert.equal(c.bridge.maxBatchItems, 10)
+  assert.deepEqual(c.excludePresets, [])
+  // 只给了 provider/model：reasoningEffort 补空串
+  assert.deepEqual(c.executor, { provider: 'p', model: 'm', reasoningEffort: '' })
 })
 
 test('非法枚举值回落到默认档位', () => {
-  const c = resolveConfig({ strategy: 'turbo' as never, scope: 'everything' as never, defaultThinking: 'maybe' as never })
+  const c = resolveConfig({ strategy: 'turbo' as never, scope: 'everything' as never })
   assert.equal(c.strategy, 'balanced')
   assert.equal(c.scope, 'preset')
-  assert.equal(c.defaultThinking, 'silent')
 })
 
-test('策略推导门控参数', () => {
-  for (const strategy of ['saver', 'balanced', 'powerful'] as const) {
-    const c = resolveConfig({ strategy })
-    assert.equal(c.minEstimatedSavedTokens, STRATEGY_TUNING[strategy].minEstimatedSavedTokens)
-    assert.equal(c.maxDelegationsPerTask, STRATEGY_TUNING[strategy].maxDelegationsPerTask)
-    assert.equal(c.maxDelegationsPerHour, STRATEGY_TUNING[strategy].maxDelegationsPerHour)
-  }
-  assert.ok(STRATEGY_TUNING.saver.minEstimatedSavedTokens > STRATEGY_TUNING.powerful.minEstimatedSavedTokens)
-})
-
-test('tuning 显式字段覆盖策略推导值', () => {
+test('executor 归一化：trim、非字符串字段回落空串', () => {
   const c = resolveConfig({
-    strategy: 'saver',
-    tuning: { minEstimatedSavedTokens: 50, maxDelegationsPerTask: 99, maxInputCharacters: 2000 },
+    executor: { provider: ' deepseek ', model: ' deepseek-chat ', reasoningEffort: ' low ' } as never,
   })
-  assert.equal(c.minEstimatedSavedTokens, 50)
-  assert.equal(c.maxDelegationsPerTask, 99)
-  assert.equal(c.maxInputCharacters, 2000)
-  // 未显式给出的字段仍按策略推导
-  assert.equal(c.maxDelegationsPerHour, STRATEGY_TUNING.saver.maxDelegationsPerHour)
+  assert.deepEqual(c.executor, { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'low' })
+
+  const partial = resolveConfig({ executor: { provider: 'p', model: '', reasoningEffort: 7 } as never })
+  assert.deepEqual(partial.executor, { provider: 'p', model: '', reasoningEffort: '' })
+
+  const junk = resolveConfig({ executor: null as never })
+  assert.deepEqual(junk.executor, { provider: '', model: '', reasoningEffort: '' })
 })
 
-test('并发护栏不可被 tuning 突破', () => {
-  const c = resolveConfig({ tuning: { maxConcurrentDelegations: 8 } })
-  assert.equal(c.maxConcurrentDelegations, 1)
-  const c2 = resolveConfig({ bridge: { concurrency: 8 } as never })
-  assert.equal(c2.bridge.concurrency, 1)
+// —— 回归：历史 settings.yaml 里可能残留已退役通道的配置块 ——
+test('旧配置残留 bridge 字段不影响加载', () => {
+  // schemastery 的 object 对未知键不报错，resolveConfig 也必须同样宽容：
+  // 逐字段读取、绝不透传残留键，用户不需要手工清理设置文件。
+  // （本用例是退役验收唯一允许出现该字面量的位置。）
+  let resolved: ReturnType<typeof resolveConfig> | undefined
+  assert.doesNotThrow(() => {
+    resolved = resolveConfig({ enabled: true, bridge: { enabled: true } } as never)
+  })
+  const c = resolved!
+  assert.equal(c.enabled, true)
+  assert.equal(Object.hasOwn(c, 'bridge'), false, '归一化结果不应出现残留的 bridge 键')
+  assert.deepEqual(c.executor, { provider: '', model: '', reasoningEffort: '' })
+  assert.deepEqual(Object.keys(c).sort(), ['enabled', 'excludePresets', 'executor', 'scope', 'strategy'])
 })
 
-test('bridge 配置逐字段兜底且丢弃非法 extraHeaders', () => {
-  const c = resolveConfig({
-    bridge: {
-      baseUrl: 'http://127.0.0.1:9999/v1',
-      apiKey: 'secret',
-      extraHeaders: { 'X-A': 'ok', 'X-B': 42 } as never,
-      modelMap: { plain: 'p1' } as never,
-      trustUsage: 'never',
-    },
-  })
-  assert.equal(c.bridge.baseUrl, 'http://127.0.0.1:9999/v1')
-  assert.equal(c.bridge.apiKey, 'secret')
-  assert.deepEqual(c.bridge.extraHeaders, { 'X-A': 'ok' })
-  assert.equal(c.bridge.modelMap.plain, 'p1')
-  assert.equal(c.bridge.modelMap.thinking, DEFAULT_CONFIG.bridge.modelMap.thinking)
-  assert.equal(c.bridge.trustUsage, 'never')
+test('excludePresets 归一化：非法项被丢弃，空数组保留', () => {
+  assert.deepEqual(resolveConfig({ excludePresets: ['liangshen', '', 42 as never, '  '] }).excludePresets, ['liangshen'])
+  assert.deepEqual(resolveConfig({ excludePresets: [] }).excludePresets, [])
+  assert.deepEqual(resolveConfig({ excludePresets: 'nope' as never }).excludePresets, [])
 })
 
 test('isCompleteModelRoute 要求 provider 与 model 都非空', () => {
@@ -113,7 +97,10 @@ test('resolveEffectiveConfig 合并覆写后再归一化', () => {
   )
   assert.equal(c.strategy, 'powerful')
   assert.equal(c.executor.provider, 'x')
-  assert.equal(c.minEstimatedSavedTokens, STRATEGY_TUNING.powerful.minEstimatedSavedTokens)
+  assert.equal(c.executor.model, 'y')
+  // 覆写只带 provider/model 时 reasoningEffort 仍补空串
+  assert.equal(c.executor.reasoningEffort, '')
+  assert.equal(c.scope, 'preset')
 })
 
 test('scopeAllowsPreset：preset 模式只认专属预设；global 模式用排除清单', () => {
@@ -137,6 +124,10 @@ test('normalizeSessionOverride 丢弃未知键与非法值', () => {
     normalizeSessionOverride({ strategy: 'saver', executor: { provider: ' p ', model: 'm', nope: 1 } }),
     { strategy: 'saver', executor: { provider: 'p', model: 'm' } },
   )
+  assert.deepEqual(
+    normalizeSessionOverride({ executor: { reasoningEffort: ' high ' } }),
+    { executor: { reasoningEffort: 'high' } },
+  )
 })
 
 test('assertConfigValid：默认（未选 executor）必须可加载，半配置才抛错', () => {
@@ -149,5 +140,11 @@ test('assertConfigValid：默认（未选 executor）必须可加载，半配置
   assert.throws(() => assertConfigValid({ enabled: true, executor: { provider: 'p' } }))
   assert.throws(() => assertConfigValid({ enabled: true, executor: { model: 'm' } }))
   assert.doesNotThrow(() => assertConfigValid({ enabled: true, executor: { provider: 'p', model: 'm' } }))
+})
+
+test('assertConfigValid：enabled=false 时跳过 executor 校验', () => {
+  // 总开关关闭 → 子代理通道整体不生效，半配置不阻塞加载
   assert.doesNotThrow(() => assertConfigValid({ enabled: false }))
+  assert.doesNotThrow(() => assertConfigValid({ enabled: false, executor: { provider: 'p' } }))
+  assert.doesNotThrow(() => assertConfigValid({ enabled: false, executor: { model: 'm' } }))
 })

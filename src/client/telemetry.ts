@@ -13,25 +13,24 @@ export type ValueRouterProductTelemetryEvent =
   | { kind: 'strategy'; strategy: 'saver' | 'balanced' | 'powerful' }
   | { kind: 'scope'; scope: 'preset' | 'global' }
   | { kind: 'session-override'; action: 'set' | 'reset' }
-  | { kind: 'bridge'; state: 'up' | 'down' | 'unknown' }
 
-type DesktopTelemetryBridge = {
+type DesktopTelemetryApi = {
   recordValueRouterEvent?: (event: ValueRouterProductTelemetryEvent) => Promise<unknown> | unknown
 }
 
 const emittedDedupeKeys = new Set<string>()
 
 /**
- * 渲染进程 → 主进程的 best-effort 桥。没有桌面宿主（纯浏览器）时静默跳过。
+ * 渲染进程 → 主进程的 best-effort 上报通道。没有桌面宿主（纯浏览器）时静默跳过。
  */
 export function reportValueRouterTelemetry(
   event: ValueRouterProductTelemetryEvent,
   dedupeKey?: string,
 ): void {
-  const bridge = typeof window === 'undefined'
+  const desktop = typeof window === 'undefined'
     ? undefined
-    : (window as unknown as { dshDesktop?: DesktopTelemetryBridge }).dshDesktop
-  if (typeof bridge?.recordValueRouterEvent !== 'function') return
+    : (window as unknown as { dshDesktop?: DesktopTelemetryApi }).dshDesktop
+  if (typeof desktop?.recordValueRouterEvent !== 'function') return
   if (dedupeKey !== undefined && emittedDedupeKeys.has(dedupeKey)) return
   if (dedupeKey !== undefined) {
     emittedDedupeKeys.add(dedupeKey)
@@ -40,7 +39,7 @@ export function reportValueRouterTelemetry(
     setTimeout(() => emittedDedupeKeys.delete(dedupeKey), 1_000)
   }
   try {
-    void Promise.resolve(bridge.recordValueRouterEvent(event)).catch(() => {})
+    void Promise.resolve(desktop.recordValueRouterEvent(event)).catch(() => {})
   } catch {
     // 产品遥测永远不能影响设置或会话 UI。
   }

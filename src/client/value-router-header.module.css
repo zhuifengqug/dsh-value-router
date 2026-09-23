@@ -51,7 +51,7 @@
   box-shadow: 0 20px 55px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(96, 165, 250, 0.06) !important;
 }
 
-/* The blank-session bridge is mounted directly under body, so it does not
+/* The blank-session guide is mounted directly under body, so it does not
    inherit the `.root` scoping used by the session-header chip. The host may
    add its modal-layer class to portal nodes; keep this guide content-sized so
    its footer remains reachable below the desktop title bar. */
@@ -260,10 +260,6 @@
   min-width: 0;
   padding: 4px 6px;
   font-size: 11px;
-}
-
-.savingsValue {
-  font-weight: 600;
 }
 
 @media (max-width: 560px) {

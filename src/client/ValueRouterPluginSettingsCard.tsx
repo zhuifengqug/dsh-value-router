@@ -54,7 +54,7 @@ export const ValueRouterPluginSettingsCard: React.FC<ValueRouterPluginSettingsCa
         <span className={pluginItemStyles.headText}>
           <span className={pluginItemStyles.name}>价值路由</span>
           <span className={pluginItemStyles.description}>
-            主模型不被接管：子任务下沉给 executor，单轮问答经本地桥外发网页端模型。
+            主模型不被接管：带工具的子任务下沉给 executor 子代理执行。
           </span>
         </span>
         <span className={statusClass} aria-hidden="true">

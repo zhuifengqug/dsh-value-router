@@ -3,8 +3,8 @@
  *
  * 三件事：
  * - 徽章文案含策略与 scope 标记（预设 / 全局）；
- * - 气泡展示策略、executor（provider/model）、scope、executor 调用占比、桥健康点、
- *   累计节省 Token（估算口径）、桥委派次数、批次进度、桥最近错误/提示；
+ * - 气泡展示策略、executor（provider/model/状态）、scope、本会话与累计 executor
+ *   调用次数；
  * - 「全局默认 / 仅本会话」切换：仅本会话时经 Remote `setSessionOverride` 写宿主
  *   （只进宿主内存，不污染全局设置），并提供重置。
  *
@@ -68,8 +68,8 @@ function renderPortal(node: React.ReactNode): React.ReactNode {
   return typeof document === 'undefined' ? node : createPortal(node, document.body)
 }
 
-function bridgeHealthText(status: 'up' | 'down' | 'unknown'): string {
-  return status === 'up' ? '正常' : status === 'down' ? '断开' : '未知'
+function executorStatusText(status: 'active' | 'disabled' | 'unconfigured' | 'degraded'): string {
+  return status === 'active' ? '正常' : status === 'unconfigured' ? '未配置' : status === 'degraded' ? '部分模型不可用' : '已关闭'
 }
 
 export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = ({
@@ -322,11 +322,6 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     : resolved.enabled
       ? styles.badgeActive
       : styles.badgeInactive
-  const healthClass = liveStatus?.bridgeStatus === 'up'
-    ? styles.bridgeDotUp
-    : liveStatus?.bridgeStatus === 'down'
-      ? styles.bridgeDotDown
-      : styles.bridgeDotUnknown
 
   const quickPopover = (
     <>
@@ -364,6 +359,15 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
           <span className={styles.popoverItemLabel}>executor:</span>
           <span className={styles.popoverItemValue}>{formatModel(resolved.executor)}</span>
         </div>
+        {liveStatus && (
+          <div className={styles.popoverItem}>
+            <span className={styles.popoverItemLabel}>executor 状态:</span>
+            <span className={styles.popoverItemValue}>
+              {executorStatusText(liveStatus.executorStatus)}
+              {liveStatus.executorReason ? ` · ${liveStatus.executorReason}` : ''}
+            </span>
+          </div>
+        )}
         <div className={styles.popoverItem}>
           <span className={styles.popoverItemLabel}>当前策略:</span>
           <span className={styles.popoverItemValue}>{strategyLabel(resolved.strategy)}</span>
@@ -380,44 +384,10 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
           <span className={styles.statItemValue}>{liveMetrics?.executorCalls ?? 0} 次</span>
         </div>
         <div className={styles.statItem}>
-          <span className={styles.statItemLabel}>本会话桥委派</span>
-          <span className={styles.statItemValue}>{liveMetrics?.bridgeDelegations ?? 0} 次</span>
-        </div>
-        <div className={styles.statSavingsHighlight}>
-          <span>executor 调用占比</span>
-          <span className={headerStyles.savingsValue}>{liveMetrics?.executorSharePercent ?? 0}%</span>
+          <span className={styles.statItemLabel}>累计 executor 调用</span>
+          <span className={styles.statItemValue}>{liveStatus?.executorCallsTotal ?? 0} 次</span>
         </div>
       </div>
-
-      <div className={styles.bridgeHealthRow}>
-        <span className={`${styles.bridgeDot} ${healthClass}`} aria-hidden="true" />
-        <span>桥健康：{bridgeHealthText(liveStatus?.bridgeStatus ?? 'unknown')}</span>
-        {liveStatus?.bridgeCheckedAt !== undefined && (
-          <span className={headerStyles.savingsValue}>{new Date(liveStatus.bridgeCheckedAt).toLocaleTimeString()}</span>
-        )}
-      </div>
-
-      <div className={styles.popoverItem}>
-        <span className={styles.popoverItemLabel}>累计桥委派:</span>
-        <span className={styles.popoverItemValue}>{liveStatus?.bridgeDelegationsTotal ?? 0} 次</span>
-      </div>
-      <div className={styles.popoverItem}>
-        <span className={styles.popoverItemLabel}>累计节省 Token:</span>
-        <span className={styles.popoverItemValue}>
-          {(liveStatus?.savedTokensTotal ?? 0).toLocaleString()}
-          {(liveStatus?.estimateOnlyCount ?? 0) > 0 ? '（估算）' : ''}
-        </span>
-      </div>
-      {liveStatus?.batch && (
-        <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>批次进度:</span>
-          <span className={styles.popoverItemValue}>
-            {liveStatus.batch.done}/{liveStatus.batch.total}{liveStatus.batch.running ? '（执行中）' : ''}
-          </span>
-        </div>
-      )}
-      {liveStatus?.lastError && <div className={headerStyles.setupError} role="alert">{liveStatus.lastError}</div>}
-      {liveStatus?.lastMessage && <div className={headerStyles.setupHint}>{liveStatus.lastMessage}</div>}
 
       <div className={headerStyles.actionStack}>
         <div className={headerStyles.actionRow}>

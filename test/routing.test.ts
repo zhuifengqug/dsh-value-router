@@ -84,7 +84,7 @@ test('总开关关闭时不路由', () => {
   assert.deepEqual(decision, { route: false, reason: 'disabled' })
 })
 
-test('executor 未配置完整时不路由（executor 缺失不影响桥工具，此处只关子代理通道）', () => {
+test('executor 未配置完整时不路由（此处只关子代理通道）', () => {
   const decision = decideSubagentRoute({
     globalConfig: baseConfig({ executor: { provider: 'deepseek', model: '' } }),
     ...SUBAGENT,
@@ -129,8 +129,10 @@ test('会话覆写可换 executor，并带上 reasoningEffort', () => {
   assert.equal(decision.reasoningEffort, 'low')
   assert.equal(decision.overrideSource, 'session')
   assert.equal(decision.effective.strategy, 'saver')
-  // 策略随之影响桥门控参数（saver 更严格）
-  assert.equal(decision.effective.minEstimatedSavedTokens, 300)
+  // 覆写后的生效配置仍是完整的 5 字段形状
+  assert.equal(decision.effective.scope, 'preset')
+  assert.deepEqual(decision.effective.excludePresets, [])
+  assert.deepEqual(decision.effective.executor, { provider: 'other', model: 'cheap-model', reasoningEffort: 'low' })
 })
 
 test('子代理没有自身覆写时使用父会话覆写', () => {

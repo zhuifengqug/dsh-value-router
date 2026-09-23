@@ -5,12 +5,15 @@
 # **不再重复声明插件行**——否则切到本预设会二次 apply()，撞上
 # "settings namespace ... already registered"。
 #
-# 路由语义（scope = preset 时的专属预设）：
+# 路由语义（scope 决定生效范围——两种用法都是正式支持，不是「默认值 vs 越界配置」）：
+# - scope = global：价值路由对**所有预设**的会话生效，可用 excludePresets 排除个别预设；
+# - scope = preset（默认值）：仅当前预设为 value-router 的会话生效，即把本预设
+#   当作「专属预设」使用的那一种。
+#
+# 两种 scope 下行为一致：
 # - 主模型：用户在会话里选的模型，插件**永不接管**；
 # - 子代理会话（subagent / subagent_fork / workflow worker，origin=subagent）：
-#   由 host 侧 agent/request 拦截改写为配置的 executor 模型（maxDepth=1）；
-# - 无工具的独立单轮问答：主模型经 bridge_ask / bridge_batch 交给本地
-#   Chat2API 桥外发网页端模型。
+#   由 host 侧 agent/request 拦截改写为配置的 executor 模型。
 
 # ── identity ────────────────────────────────────────────────────────────────
 

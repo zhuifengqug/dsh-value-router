@@ -9,9 +9,11 @@
  *
  * 方法（declaration order = wire order，需与 status-controller.ts 的
  * markRemote 顺序一致）：
- * - status：只读快照（路由配置 + executor 健康 + 桥健康 / 委派统计 / 批次进度）；
- * - sessionMetrics：某会话的 executor 与桥计量 + 该会话的覆写；
+ * - status：只读快照（路由配置 + executor 健康 + executor 调用计数）；
+ * - sessionMetrics：某会话的 executor 调用次数 + 该会话的覆写；
  * - setSessionOverride：写入/清除会话级覆写（顶栏气泡用，不污染全局配置）。
+ *
+ * 桥接通道退役后，桥健康 / token / 批次相关 schema 一并删除。
  */
 import { z } from 'zod'
 
@@ -51,19 +53,6 @@ const setSessionOverrideInput = z.object({
 
 // —— 结果 schema ——
 
-const bridgeTokensTotalSchema = z.object({
-  promptTokens: z.number().int().nonnegative(),
-  completionTokens: z.number().int().nonnegative(),
-  total: z.number().int().nonnegative(),
-}).strict()
-
-const batchSchema = z.object({
-  batchId: z.string(),
-  done: z.number().int().nonnegative(),
-  total: z.number().int().nonnegative(),
-  running: z.boolean(),
-}).strict()
-
 const statusResultSchema = z.object({
   enabled: z.boolean(),
   scope: z.enum(['preset', 'global']),
@@ -72,37 +61,10 @@ const statusResultSchema = z.object({
   executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
   executorReason: z.string().optional(),
   executorCallsTotal: z.number().int().nonnegative(),
-  bridgeDelegationsTotal: z.number().int().nonnegative(),
-  bridgeEnabled: z.boolean(),
-  autoDelegate: z.boolean(),
-  bridgeStatus: z.enum(['up', 'down', 'unknown']),
-  bridgeCheckedAt: z.number().optional(),
-  bridgeDetail: z.string().optional(),
-  delegating: z.boolean(),
-  lastTaskDelegations: z.number().int().nonnegative(),
-  maxDelegationsPerTask: z.number().int().nonnegative(),
-  delegationsTotal: z.number().int().nonnegative(),
-  bridgeTokensTotal: bridgeTokensTotalSchema,
-  savedTokensTotal: z.number().int().nonnegative(),
-  estimateOnlyCount: z.number().int().nonnegative(),
-  batch: batchSchema.optional(),
-  lastOutcome: z.enum(['ok', 'fail', 'none']),
-  lastMessage: z.string().optional(),
-  lastError: z.string().optional(),
-  availableModels: z.array(z.string()).optional(),
 }).strict()
 
 const sessionMetricsSchema = z.object({
   executorCalls: z.number().int().nonnegative(),
-  executorInputTokens: z.number().int().nonnegative(),
-  executorOutputTokens: z.number().int().nonnegative(),
-  bridgeDelegations: z.number().int().nonnegative(),
-  bridgePromptTokens: z.number().int().nonnegative(),
-  bridgeCompletionTokens: z.number().int().nonnegative(),
-  bridgeTotalTokens: z.number().int().nonnegative(),
-  bridgeSavedTokens: z.number().int().nonnegative(),
-  estimateOnlyCount: z.number().int().nonnegative(),
-  executorSharePercent: z.number().int().min(0).max(100),
   override: overrideSchema.nullable(),
 }).strict()
 

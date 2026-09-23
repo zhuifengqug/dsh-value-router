@@ -123,18 +123,32 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
     executor: { provider: 'p', model: 'm', reasoningEffort: '' },
     executorStatus: 'active',
     executorCallsTotal: 0,
-    bridgeDelegationsTotal: 0,
-    bridgeEnabled: true,
-    autoDelegate: true,
-    bridgeStatus: 'unknown',
-    delegating: false,
-    lastTaskDelegations: 0,
-    maxDelegationsPerTask: 10,
-    delegationsTotal: 0,
-    bridgeTokensTotal: { promptTokens: 0, completionTokens: 0, total: 0 },
-    savedTokensTotal: 0,
-    estimateOnlyCount: 0,
-    lastOutcome: 'none',
   }
   assert.equal(result.schema.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
+  // executorReason 是唯一的可选键：给出时也必须通过
+  assert.equal(
+    result.schema.safeParse({ ...full, executorStatus: 'degraded', executorReason: 'executor provider 不可用' }).success,
+    true,
+  )
+  // 已退役通道的字段一律被 strict 拒绝（防止宿主/客户端悄悄回潮）
+  assert.equal(result.schema.safeParse({ ...full, delegationsTotal: 0 }).success, false, '退役字段应被拒绝')
+  assert.equal(result.schema.safeParse({ ...full, lastOutcome: 'none' }).success, false, '退役字段应被拒绝')
+  // 枚举值必须落在声明的取值内
+  assert.equal(result.schema.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
+})
+
+test('sessionMetrics 结果形状：executorCalls + override（可 null）', () => {
+  const metrics = TYPERT.invocations[1]!
+  const result = metrics.result as { schema: { safeParse: (v: unknown) => { success: boolean } } }
+  const base = { executorCalls: 3, override: null }
+  assert.equal(result.schema.safeParse(base).success, true)
+  assert.equal(
+    result.schema.safeParse({ executorCalls: 0, override: { strategy: 'saver', executor: { provider: 'p', model: 'm', reasoningEffort: 'low' } } }).success,
+    true,
+  )
+  assert.equal(result.schema.safeParse({ executorCalls: 3 }).success, false, 'override 是必填键（可为 null）')
+  assert.equal(result.schema.safeParse({ override: null }).success, false, '缺 executorCalls 应被拒绝')
+  assert.equal(result.schema.safeParse({ ...base, extra: 1 }).success, false, '未知字段应被拒绝')
+  assert.equal(result.schema.safeParse({ ...base, executorCalls: -1 }).success, false, '负数计数应被拒绝')
+  assert.equal(result.schema.safeParse({ ...base, executorCalls: 1.5 }).success, false, '非整数计数应被拒绝')
 })
