@@ -50,21 +50,63 @@ export function describeFormState(snapshot: {
 }
 
 /**
- * 宿主对写入路径的硬性要求（`dsh-settings/lib/index.js:507`）：
- * **路径必须精确落在 volatile 字段上**，否则以
- * `Config field "X" is not volatile` 拒写。
+ * 把一次设置补丁展开成宿主的**多段路径**写操作。
  *
- * 顶层标量与 `tiers`（整个数组 volatile）可以整值写；但 `executor` 本身**不是**
- * volatile——它是普通对象，volatile 落在它的**子字段**上。写 `executor: {...}`
- * 会被直接拒绝，必须按叶子路径逐个写：`executor.provider` / `executor.model` /
- * `executor.reasoningEffort`。这不是风格问题，绕不过去。
+ * 两个宿主硬性要求，都踩过：
+ *
+ * 1. **路径必须精确落在 volatile 字段上**（`dsh-settings/lib/index.js:507`）。
+ *    `executor` 本身不是 volatile（普通对象，volatile 在子字段上），所以不能整对象写。
+ * 2. **路径必须是多段数组**。`ConfigForm.set(field, value)` 的实现是
+ *    `mutate([{ op:'set', path: [field], value }])`——它把 `field` 整个当作**一个**路径段。
+ *    传 `'executor.provider'` 会得到 `['executor.provider']`，宿主按
+ *    `schema.dict['executor.provider']` 查表必然查不到，于是**静默拒写**
+ *    （返回 false，不抛错）。嵌套字段只能走 `mutate()` + `['executor','provider']`。
  */
-export function expandWritePaths(key: string, value: unknown): [string, unknown][] {
-  if (key !== 'executor' || typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return [[key, value]]
+export interface WriteOp {
+  op: 'set'
+  path: string[]
+  value: unknown
+}
+
+export function expandWriteOps(patch: Partial<ValueRouterConfig>): WriteOp[] {
+  const ops: WriteOp[] = []
+  for (const [key, value] of Object.entries(structuredClone(patch))) {
+    if (value === undefined) continue
+    if (key === 'executor' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      for (const [leaf, leafValue] of Object.entries(value as Record<string, unknown>)) {
+        if (leafValue === undefined) continue
+        ops.push({ op: 'set', path: ['executor', leaf], value: leafValue })
+      }
+      continue
+    }
+    ops.push({ op: 'set', path: [key], value })
   }
-  return Object.entries(value as Record<string, unknown>)
-    .map(([leaf, leafValue]): [string, unknown] => [`executor.${leaf}`, leafValue])
+  return ops
+}
+
+/** 沿多段路径取值，用于写后回读校验。 */
+function readPath(root: unknown, path: readonly string[]): unknown {
+  let node = root
+  for (const segment of path) {
+    if (typeof node !== 'object' || node === null) return undefined
+    node = (node as Record<string, unknown>)[segment]
+  }
+  return node
+}
+
+/** 沿多段路径确认「确实由 user 层显式写入」，而不是恰好从继承层得到相同的值。 */
+function writtenInUserLayer(user: unknown, path: readonly string[], value: unknown): boolean {
+  let node = user
+  for (let i = 0; i < path.length - 1; i++) {
+    if (typeof node !== 'object' || node === null) return false
+    const segment = path[i]!
+    if (!Object.hasOwn(node as Record<string, unknown>, segment)) return false
+    node = (node as Record<string, unknown>)[segment]
+  }
+  const leaf = path[path.length - 1]!
+  if (typeof node !== 'object' || node === null) return false
+  if (!Object.hasOwn(node as Record<string, unknown>, leaf)) return false
+  return sameSetting((node as Record<string, unknown>)[leaf], value)
 }
 
 export function createValueRouterSettingsWriter(
@@ -73,25 +115,27 @@ export function createValueRouterSettingsWriter(
 ): (patch: Partial<ValueRouterConfig>) => Promise<void> {
   let tail: Promise<void> = Promise.resolve()
   return (patch) => {
-    const entries = Object.entries(structuredClone(patch))
-      .flatMap(([key, value]) => expandWritePaths(key, value))
+    const ops = expandWriteOps(patch)
+    if (ops.length === 0) return Promise.resolve()
     const task = tail.then(async () => {
-      for (const [key, value] of entries) {
-        if (value === undefined) continue
-        const before = form.getSnapshot()
-        if (before.status !== 'ready' || !before.writable) {
-          throw new Error(`${t('settingsNotWritable')} [${describeFormState(before)}]`)
-        }
-        const acceptedByHost = await form.set(key, value)
-        const accepted = form.getSnapshot()
-        const user = accepted.user
-        // 继承值恰好相等并不能证明这次显式覆写被保存：必须由 user 原始层确认该字段。
-        if (!acceptedByHost || accepted.status !== 'ready' || typeof user !== 'object' || user === null
-          || !Object.hasOwn(user, key) || !sameSetting((user as Record<string, unknown>)[key], value)) {
-          throw new Error(
-            `${t('settingsSaveFailed')} [acceptedByHost=${acceptedByHost} status=${accepted.status} field=${key}]`,
-          )
-        }
+      const before = form.getSnapshot()
+      if (before.status !== 'ready' || !before.writable) {
+        throw new Error(`${t('settingsNotWritable')} [${describeFormState(before)}]`)
+      }
+      // 一次 mutate 提交全部字段：宿主把它当一次原子编辑，避免连续写互相顶掉 revision。
+      const acceptedByHost = await form.mutate(ops as never)
+      const accepted = form.getSnapshot()
+      const user = accepted.user
+      const failed = ops.find(op =>
+        !writtenInUserLayer(user, op.path, op.value)
+        || !sameSetting(readPath(accepted.value, op.path), op.value),
+      )
+      // 继承值恰好相等并不能证明这次显式覆写被保存：必须由 user 原始层确认。
+      if (!acceptedByHost || accepted.status !== 'ready' || failed !== undefined) {
+        throw new Error(
+          `${t('settingsSaveFailed')} [acceptedByHost=${acceptedByHost} status=${accepted.status} ` +
+          `field=${failed?.path.join('.') ?? '-'}]`,
+        )
       }
     })
     tail = task.catch(() => {})

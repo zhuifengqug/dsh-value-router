@@ -5,6 +5,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { expandWriteOps } from '../src/client/settings-write.ts'
+
 import {
   DEFAULT_AMBIGUOUS_POLICY,
   DEFAULT_CONFIG,
@@ -261,4 +263,38 @@ test('normalizeSessionOverride 丢弃未知键与非法值', () => {
     { strategy: 'saver', executor: { provider: 'p', model: 'm' } },
   )
   assert.equal(DEFAULT_AMBIGUOUS_POLICY, 'rotate')
+})
+
+// —— 写入路径：宿主的两个硬性要求（0.5.3 实测踩出）——
+
+test('expandWriteOps：顶层字段用单段路径', () => {
+  assert.deepEqual(expandWriteOps({ enabled: false, strategy: 'saver' }), [
+    { op: 'set', path: ['enabled'], value: false },
+    { op: 'set', path: ['strategy'], value: 'saver' },
+  ])
+})
+
+test('expandWriteOps：tiers 整数组单段写入（它是顶层 volatile）', () => {
+  const tiers = [{ id: 'a', label: 'A', pool: [] }]
+  assert.deepEqual(expandWriteOps({ tiers }), [{ op: 'set', path: ['tiers'], value: tiers }])
+})
+
+test('expandWriteOps：executor 必须拆成多段叶子路径', () => {
+  // 两个坑叠在一起：
+  // ① executor 本身不是 volatile（volatile 在子字段上），整对象写会被宿主拒；
+  // ② ConfigForm.set(field) 把 field 当成**一个**路径段——传 'executor.provider'
+  //    会得到 ['executor.provider']，宿主查 schema.dict['executor.provider'] 必然查不到，
+  //    于是**静默拒写**（返回 false，不抛错，UI 只能报「保存失败」）。
+  assert.deepEqual(expandWriteOps({ executor: { provider: 'p', model: 'm', reasoningEffort: '' } }), [
+    { op: 'set', path: ['executor', 'provider'], value: 'p' },
+    { op: 'set', path: ['executor', 'model'], value: 'm' },
+    { op: 'set', path: ['executor', 'reasoningEffort'], value: '' },
+  ])
+})
+
+test('expandWriteOps：跳过 undefined 值与空补丁', () => {
+  assert.deepEqual(expandWriteOps({ enabled: undefined, strategy: 'saver' }), [
+    { op: 'set', path: ['strategy'], value: 'saver' },
+  ])
+  assert.deepEqual(expandWriteOps({}), [])
 })

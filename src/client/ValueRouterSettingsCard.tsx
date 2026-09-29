@@ -174,10 +174,13 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
     commitTiers(tierList.map((tier, i) => (i === index ? { ...tier, ...patch } : tier)))
   }
 
-  const handleAddLine = (tierIndex: number): void => {
-    const tier = tierList[tierIndex]
-    if (tier === undefined) return
-    patchTier(tierIndex, { pool: [...tier.pool, { provider: '', model: '', reasoningEffort: '' }] })
+  /**
+   * 「添加线路」直接打开模型选择器——用户不该被要求手打 provider/model。
+   * 选定后才把这条线路写进池子；取消则不留下空行。
+   * `pendingTier` 为该档下标；`pendingLine` 为已有行时是行号，为 null 表示「新增」。
+   */
+  const startAddLine = (tierIndex: number): void => {
+    setPickingFor({ tier: tierIndex, line: -1 })
   }
 
   const handleRemoveLine = (tierIndex: number, lineIndex: number): void => {
@@ -362,9 +365,10 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
                   <button
                     type="button"
                     className={styles.button}
-                    onClick={() => handleAddLine(tierIndex)}
+                    onClick={() => startAddLine(tierIndex)}
                   >
                     添加线路到第 {tierIndex + 1} 档
+
                   </button>
                 </div>
               </div>
@@ -477,16 +481,35 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
       {(pickingFallback || pickingFor !== null) && (
         <ModelPicker
-          title={pickingFor !== null ? `选择第 ${pickingFor.tier + 1} 档 第 ${pickingFor.line + 1} 条线路的模型` : '选择兜底线路'}
-          current={pickingFor !== null ? tierList[pickingFor.tier]?.pool[pickingFor.line] : resolved.executor}
+          title={
+            pickingFor === null
+              ? '选择兜底线路'
+              : pickingFor.line < 0
+                ? `为第 ${pickingFor.tier + 1} 档添加线路`
+                : `更换第 ${pickingFor.tier + 1} 档 第 ${pickingFor.line + 1} 条线路`
+          }
+          current={
+            pickingFor === null
+              ? resolved.executor
+              : pickingFor.line < 0
+                ? undefined
+                : tierList[pickingFor.tier]?.pool[pickingFor.line]
+          }
           selectHighestEffort
           onSelect={(selection) => {
             if (pickingFor !== null) {
-              patchLine(pickingFor.tier, pickingFor.line, {
+              const next = {
                 provider: selection.provider ?? '',
                 model: selection.model ?? '',
                 reasoningEffort: selection.reasoningEffort ?? '',
-              })
+              }
+              if (pickingFor.line < 0) {
+                // 新增：选完才落盘，取消不留空行
+                const tier = tierList[pickingFor.tier]
+                if (tier !== undefined) patchTier(pickingFor.tier, { pool: [...tier.pool, next] })
+              } else {
+                patchLine(pickingFor.tier, pickingFor.line, next)
+              }
               setPickingFor(null)
             } else {
               handleFallbackSelected(selection)
