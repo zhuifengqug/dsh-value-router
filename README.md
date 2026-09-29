@@ -167,12 +167,18 @@ value-router:
 
 ## 6. 安装
 
-最低宿主：**DSH 0.1.7-rc.2**（peer 范围已收窄，更早的宿主会拒绝安装或静默禁用该插件行）。
+最低宿主：**DSH 0.2.0-rc.1**（peer 范围已收窄，更早的宿主会拒绝安装或静默禁用该插件行）。
+0.2.x 需要 0.1.7-rc.2 或更新；0.3.0 需要 0.2.0-rc.1 或更新。
 
 ```bash
 # 开发装载（软链，改 lib/ 后重启 dsh 即生效）
-dsh plugin --profile web add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
+dsh plugin --profile web     add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
+dsh plugin --profile desktop add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
 ```
+
+> **桌面端**用 `desktop` profile。桌面 profile 里其它插件同样声明 `platform: "web"`——
+> 桌面就是同一个 Web 客户端套 Electron 壳，所以本插件**不需要为桌面改任何声明**，
+> 两个 profile 的配置也各存各的（改一个不影响另一个）。
 
 > 用 `file:` 会把包**复制**进 profile 的 node_modules，改 `lib/` 不生效。开发期只用 `link:`。
 
@@ -192,7 +198,7 @@ dsh plugin --profile web add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-
 ```bash
 pnpm install --config.confirmModulesPurge=false
 pnpm typecheck   # tsc ×2（host + client）
-pnpm test        # vitest，80 个用例
+pnpm test        # vitest，92 个用例
 pnpm build       # tsdown
 ```
 
@@ -213,8 +219,12 @@ git checkout v0.1.0-local && pnpm install && pnpm build
 
 ## 9. 退役记录
 
+- **2026-09-29（0.3.0）**：适配宿主 DSH 0.2.0-rc.1。逐条核对插件依赖的运行时契约
+  （`agent/request` waterfall 语义、`subagentModelSelection` 白名单服务、typert 的
+  `create()` 要求）全部未变，**无源码改动**。
 - **2026-09-29（0.2.0）**：专属预设 `value-router` 整体删除；`scope` / `excludePresets`
-  字段删除；「无条件改写子代理线路」改为「显式指定即放行 + 轮转兜底」。
+  字段删除；「无条件改写子代理线路」改为「显式指定即放行 + 轮转兜底」；
+  轮转池不再设条数上限，宿主白名单成为唯一真源闸门。
 - **2026-09-22（0.1.0）**：桥接通道（Chat2API 外发 + `bridge_*` 三工具 + 12 道门控 +
   脱敏/限额/压缩回注/字符估算记账）整体删除，配置面从 30+ 字段收缩到 5 个。
   插件只剩子代理路由这一条通道，不再持有任何 HTTP 客户端或批次队列。

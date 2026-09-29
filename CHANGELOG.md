@@ -5,6 +5,35 @@
 
 ---
 
+## 0.3.0 — 2026-09-29
+
+宿主从 **DSH 0.1.7-rc.2 升到 0.2.0-rc.1**（跨大版本）。本版本只做适配与验证，
+**没有源码改动**——插件依赖的运行时契约全部保持原样。
+
+### Breaking
+
+- **最低宿主再次提升到 DSH 0.2.0-rc.1**：`peerDependencies` 的 `@deepseek-ai/dsh-*`
+  由 `^0.1.7-rc.2` 改为 `^0.2.0-rc.1`，`@deepseek-ai/cordis` 由 `^4.0.2` 改为 `^4.0.4`。
+  0.2.x 需要 0.1.7-rc.2 或更新；0.3.0 需要 0.2.0-rc.1 或更新。
+  / **Minimum host is now DSH 0.2.0-rc.1** with `@deepseek-ai/cordis` at `^4.0.4`.
+
+### 逐条核对（对照 0.2.0-rc.1 产物，不是假设）
+
+| 插件依赖的契约 | 0.2.0-rc.1 状态 | 依据 |
+| --- | --- | --- |
+| `agent/request` waterfall 签名与 "首次 = agent options、之后 = logged header" 语义 | **未变** | `dsh-agent/lib/types/runtime-types.d.ts:312-332` |
+| `subagentModelSelection` 服务 + `current().allowedModels` | **未变** | `dsh-tool-subagent/lib/types/model-selection-settings.d.ts:9,17,41` |
+| typert strict codec 要求 `create()` 工厂 | **未变** | `dsh-typert-loader/lib/index.js:211` |
+| 六个 `client.inject` 目标包存在且同版本 | **未变**（均 0.2.0-rc.1） | 宿主 `node_modules/@deepseek-ai/` |
+| 宿主 `settings` 命名空间 = Loader 条目 id | 未变 | 沿用 0.2.0 的设计前提 |
+
+### Changed
+
+- 版本号 0.2.0 → 0.3.0（peer 约束再次收窄属破坏性变更）。
+- README 的最低宿主版本与安装说明同步更新。
+
+---
+
 ## 0.2.0 — 2026-09-29
 
 本版本是**破坏性配置面重构 + 宿主大版本适配**。适配前插件仅在专属预设 `value-router` 内生效，
@@ -123,6 +152,17 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.3.0 — 2026-09-29
+
+**Breaking:** minimum host raised again, to DSH **0.2.0-rc.1**; peer ranges moved from
+`^0.1.7-rc.2` to `^0.2.0-rc.1` and `@deepseek-ai/cordis` from `^4.0.2` to `^4.0.4`.
+0.2.x requires DSH 0.1.7-rc.2 or newer; 0.3.0 requires 0.2.0-rc.1 or newer.
+
+**No source changes were required.** The adaptation was dependency ranges plus
+verification against the 0.2.0-rc.1 artifacts: the `agent/request` waterfall contract,
+the `subagentModelSelection` allowlist service, and the typert `create()` requirement
+all survive unchanged.
 
 ## 0.2.0 — 2026-09-29
 
