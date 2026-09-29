@@ -115,8 +115,8 @@ test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {
   // 因此不得出现任何"强制/必须走强模型"的承诺。
   assert.doesNotMatch(text, /强制/)
   assert.doesNotMatch(text, /必须.*强模型/)
-  assert.match(text, /选档参考/)
-  assert.match(text, /独立复核.*最高档/)
+  assert.match(text, /判断任务难度并选档/)
+  assert.match(text, /最高档/)
 })
 
 test('三档派发倾向：少用 / 正常 / 多用，文案互不相同', () => {

@@ -28,11 +28,11 @@ function volatileFormFieldCount(schema: unknown): number {
 test('回归：Config 的每个字段都必须标记 volatile，否则命名空间不会被宿主服务', () => {
   // 0.2.0 的 bug：这里是 0，宿主 describe() 直接返回 []，卡片不渲染 + 写入报不可写。
   const count = volatileFormFieldCount(Config)
-  assert.ok(count >= 5, `设置表单只认出 ${count} 个字段；宿主会跳过整个 value-router 命名空间`)
+  assert.ok(count >= 6, `设置表单只认出 ${count} 个字段；宿主会跳过整个 value-router 命名空间`)
 
   // 逐个点名：少任何一个字段都会让对应设置项在 GUI 里消失
   const fields = (Config as unknown as { dict: Record<string, unknown> }).dict
-  for (const key of ['enabled', 'strategy', 'pool', 'executor', 'ambiguousPolicy']) {
+  for (const key of ['enabled', 'strategy', 'tiers', 'executor', 'ambiguousPolicy', 'tierRouting']) {
     assert.ok(key in fields, `缺少字段 ${key}`)
   }
   for (const [key, field] of Object.entries(fields)) {
@@ -41,15 +41,22 @@ test('回归：Config 的每个字段都必须标记 volatile，否则命名空�
   }
 })
 
-test('兜底线路与池内线路的子字段也都必须是 volatile', () => {
+test('兜底线路、档位与池内线路的子字段也都必须是 volatile', () => {
   const fields = (Config as unknown as { dict: Record<string, unknown> }).dict
   const executor = fields.executor as { type?: string; dict: Record<string, unknown> }
   // schemastery 的数组节点用 `inner` 持有元素 schema（不是 zod 的 `item`）
-  const poolArray = fields.pool as { type?: string; meta?: { volatile?: boolean }; inner?: { dict: Record<string, unknown> } }
+  const tiersArray = fields.tiers as {
+    type?: string
+    meta?: { volatile?: boolean }
+    inner?: { type?: string; dict: Record<string, unknown> }
+  }
 
   assert.equal(volatileFormFieldCount(executor), 3, 'provider/model/reasoningEffort 三项都要在')
-  assert.equal(poolArray.type, 'array')
-  assert.equal(poolArray.meta?.volatile, true, 'pool 本身必须是 volatile，否则整个池设置项不出现')
-  assert.ok(poolArray.inner, '数组节点应持有元素 schema')
-  assert.equal(volatileFormFieldCount(poolArray.inner), 4, 'provider/model/reasoningEffort/tier 四项都要在')
+  assert.equal(tiersArray.type, 'array')
+  assert.equal(tiersArray.meta?.volatile, true, 'tiers 本身必须是 volatile，否则整个档位设置项不出现')
+  assert.ok(tiersArray.inner, '数组节点应持有元素 schema')
+  assert.equal(volatileFormFieldCount(tiersArray.inner), 3, '档位的 id/label/pool 三项都要在')
+  // 档位的 pool 是嵌套数组，内层三条线路字段也必须 volatile
+  const tierNode = tiersArray.inner as { dict: Record<string, { inner?: unknown }> }
+  assert.equal(volatileFormFieldCount(tierNode.dict.pool?.inner), 3, '线路的 provider/model/reasoningEffort 三项都要在')
 })

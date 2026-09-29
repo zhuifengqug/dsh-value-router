@@ -16,6 +16,7 @@ import type {
   PoolLine,
   ResolvedPoolLine,
   Tier,
+  TierRouting,
   ValueRouterConfig,
   ValueRouterStrategy,
 } from '../core/config.ts'
@@ -44,6 +45,7 @@ export interface ValueRouterSettingsCardProps {
 }
 
 const STRATEGIES: readonly ValueRouterStrategy[] = ['saver', 'balanced', 'powerful']
+const TIER_ROUTINGS: readonly TierRouting[] = ['tier-rotate', 'controller']
 
 const STRATEGY_DESC: Record<ValueRouterStrategy, string> = {
   saver: '少派发，能自己做的就自己做，控制子代理调用量',
@@ -434,6 +436,33 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
         </div>
         <div className={styles.fieldHint}>
           档位只改写给主控的提示词：让它更激进或更克制地派发子代理，不改变实际线路。
+        </div>
+      </div>
+
+      {/* —— 主控指定线路时的处置 —— */}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>主控选档的处理</div>
+        <div className={styles.strategyGroup}>
+          {TIER_ROUTINGS.map((mode) => (
+            <button
+              type="button"
+              key={mode}
+              aria-pressed={resolved.tierRouting === mode}
+              className={`${styles.strategyItem} ${resolved.tierRouting === mode ? styles.strategyItemSelected : ''}`}
+              onClick={() => persist({ tierRouting: mode })}
+            >
+              <span className={styles.strategyTitle}>{mode === 'tier-rotate' ? '按档位轮转' : '完全尊重主控'}</span>
+              <span className={styles.strategyDesc}>
+                {mode === 'tier-rotate'
+                  ? '主控判断难度后点名该档的任意一条线路，系统认出它属于哪一档，并在那一档内轮转派发'
+                  : '主控点名哪条就用哪条，档内不再轮转'}
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className={styles.fieldHint}>
+          两种模式下，主控<strong>不指定</strong>线路时都落最低档轮转。子代理工具没有「档位」参数，
+          主控只能点名具体线路，插件靠查表把线路映射回档位——点名的线路不在任何档里时会直接放行。
         </div>
       </div>
 

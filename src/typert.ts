@@ -74,6 +74,7 @@ const statusResultSchema = z.object({
   executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
   executorReason: z.string().optional(),
   executorCallsTotal: z.number().int().nonnegative(),
+  tierRouting: z.enum(['tier-rotate', 'controller']),
   allowlistKnown: z.boolean(),
 }).strict()
 

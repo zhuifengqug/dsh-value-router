@@ -14,7 +14,7 @@ import {
   type RouteDecisionInput,
 } from '../src/core/routing.ts'
 import type { ChildRouteIntent } from '../src/core/state.ts'
-import type { ResolvedTier, ValueRouterConfig } from '../src/core/config.ts'
+import { tierIndexOfRoute, type ResolvedTier, type ValueRouterConfig } from '../src/core/config.ts'
 
 const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
 const line = (provider: string, model: string, allowed = true) =>
@@ -25,6 +25,11 @@ const ONE_TIER: ResolvedTier[] = [{ id: 'cheap', label: '省', pool: [line('p1',
 const TWO_TIERS: ResolvedTier[] = [
   { id: 'cheap', label: '省', pool: [line('p1', 'm1')] },
   { id: 'strong', label: '强', pool: [line('p2', 'm2')] },
+]
+/** 各档 2 条，用来验证「主控定档 → 档内轮转」。 */
+const MULTI_TIERS: ResolvedTier[] = [
+  { id: 'cheap', label: '省', pool: [line('p1', 'm1'), line('p1b', 'm1b')] },
+  { id: 'strong', label: '强', pool: [line('q1', 'q-strong'), line('q2', 'q-strong-2')] },
 ]
 /** 用户层写法：把档位原样塞进配置。 */
 const tiers = (...list: ResolvedTier[]): Partial<ValueRouterConfig> => ({ tiers: list })
@@ -89,12 +94,23 @@ test('轮转：池非空时来源标记为 pool，池空时回落到兜底线路
 test('pickTargetRoute：无档位时用兜底线路', () => {
   assert.deepEqual(
     pickTargetRoute([], FALLBACK, 3),
-    { route: FALLBACK, source: 'fallback' },
+    { route: FALLBACK, source: 'fallback', tierIndex: undefined },
   )
   assert.deepEqual(
     pickTargetRoute(ONE_TIER, FALLBACK, 3),
-    { route: ONE_TIER[0]!.pool[1]!, source: 'pool' },
+    { route: ONE_TIER[0]!.pool[1]!, source: 'pool', tierIndex: 0 },
   )
+})
+
+test('scopeIndex 指定轮转作用域：主控点了第二档的线，就在第二档里转', () => {
+  // 最低档 1 条、第二档 2 条；主控点名第二档的任意一条 → 序号在第二档内循环
+  const picked = [0, 1, 2].map(index => pickTargetRoute(TWO_TIERS, FALLBACK, index, 1))
+  assert.deepEqual(picked.map(p => p.tierIndex), [1, 1, 1])
+  assert.deepEqual(picked.map(p => `${p.route.provider}/${p.route.model}`), ['p2/m2', 'p2/m2', 'p2/m2'])
+})
+
+test('scopeIndex 越界时向上兜，不掉到兜底线路', () => {
+  assert.deepEqual(pickTargetRoute(TWO_TIERS, FALLBACK, 0, 5), { route: FALLBACK, source: 'fallback', tierIndex: undefined })
 })
 
 test('轮转只发生在最低档（tiers[0]）：更高档只被主控显式指定命中', () => {
@@ -110,7 +126,9 @@ test('最低档无可路由线路时依次尝试更高档，而不是直接掉�
     { ...TWO_TIERS[0]!, pool: TWO_TIERS[0]!.pool.map(l => ({ ...l, allowed: false })) },
     TWO_TIERS[1]!,
   ]
-  assert.deepEqual(pickTargetRoute(blockedLowest, FALLBACK, 0), { route: TWO_TIERS[1]!.pool[0]!, source: 'pool' })
+  const picked = pickTargetRoute(blockedLowest, FALLBACK, 0)
+  assert.equal(picked.route.provider, 'p2')
+  assert.equal(picked.tierIndex, 1)
 })
 
 test('白名单闸门：被挡住的线路不参与轮转，序号只在放行线路上循环', () => {
@@ -120,16 +138,85 @@ test('白名单闸门：被挡住的线路不参与轮转，序号只在放行�
   }]
   // 只有 p2 放行 → 无论序号是多少都落到 p2
   for (const index of [0, 1, 2, 3]) {
-    assert.deepEqual(pickTargetRoute(gated, FALLBACK, index), { route: ONE_TIER[0]!.pool[1]!, source: 'pool' })
+    const picked = pickTargetRoute(gated, FALLBACK, index)
+    assert.equal(picked.route.provider, 'p2')
   }
 })
 
 test('白名单闸门：全部被挡时回落到兜底线路', () => {
   const blocked = ONE_TIER.map(t => ({ ...t, pool: t.pool.map(l => ({ ...l, allowed: false })) }))
-  assert.deepEqual(pickTargetRoute(blocked, FALLBACK, 0), { route: FALLBACK, source: 'fallback' })
+  assert.deepEqual(pickTargetRoute(blocked, FALLBACK, 0), { route: FALLBACK, source: 'fallback', tierIndex: undefined })
 })
 
-test('白名单闸门：所有档位全被挡 + 兜底未配置 → 无处可派', () => {
+test('tier-rotate（默认）：主控点名池内线路 → 取该档位并在档内轮转，而非用那条线', () => {
+  // 主控只传 provider/model，没有「档位」参数；插件靠查表反推档位。
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ tiers: MULTI_TIERS }),
+    rotationIndex: 1,
+    intent: intent({ provider: 'q1', model: 'q-strong', parentRoute: 'main/main-model' }),
+  }))
+  assert.equal(decision.route, true)
+  if (!decision.route) return
+  // 点名的是 strong 档的 q1，但序号 1 → 落到该档的第 2 条（q2），而不是 q1 本身
+  assert.equal(decision.tierIndex, 1)
+  assert.equal(decision.provider, 'q2')
+  assert.equal(decision.model, 'q-strong-2')
+})
+
+test('tier-rotate：主控点名的线路在第一档 → 就在第一档内轮转', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ tiers: MULTI_TIERS }),
+    rotationIndex: 0,
+    intent: intent({ provider: 'p1', model: 'm1', parentRoute: 'main/main-model' }),
+  }))
+  assert.equal(decision.route, true)
+  if (!decision.route) return
+  assert.equal(decision.tierIndex, 0)
+  assert.equal(decision.provider, 'p1')
+})
+
+test('tier-rotate：主控点名了池外线路 → 放行，尊重主控（不擅自改）', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ tiers: MULTI_TIERS }),
+    rotationIndex: 0,
+    intent: intent({ provider: 'elsewhere', model: 'other', parentRoute: 'main/main-model' }),
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'explicit-route' })
+})
+
+test('controller 模式：主控指定哪条就用哪条，档内不再轮转', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ tiers: MULTI_TIERS, tierRouting: 'controller' }),
+    rotationIndex: 1,
+    intent: intent({ provider: 'q1', model: 'q-strong', parentRoute: 'main/main-model' }),
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'explicit-route' })
+})
+
+test('两种模式下，主控没指定线路时都落最低档轮转', () => {
+  for (const tierRouting of ['tier-rotate', 'controller'] as const) {
+    const decision = decideSubagentRoute(input({
+      globalConfig: config({ tiers: MULTI_TIERS, tierRouting }),
+      rotationIndex: 0,
+    }))
+    assert.equal(decision.route, true, `${tierRouting} 模式应落最低档`)
+    if (!decision.route) continue
+    assert.equal(decision.tierIndex, 0)
+    assert.equal(decision.provider, 'p1')
+  }
+})
+
+test('tierIndexOfRoute：同一条线路出现在多个档位时取最靠前（成本最低）的', () => {
+  const tiers: ResolvedTier[] = [
+    { id: 'a', label: 'A', pool: [line('shared', 'm')] },
+    { id: 'b', label: 'B', pool: [line('shared', 'm'), line('other', 'm')] },
+  ]
+  assert.equal(tierIndexOfRoute(tiers, 'shared', 'm'), 0)
+  assert.equal(tierIndexOfRoute(tiers, 'other', 'm'), 1)
+  assert.equal(tierIndexOfRoute(tiers, 'nobody', 'm'), undefined)
+})
+
+test('白名单闸门：池全被挡 + 兜底未配置 → 无处可派', () => {
   const decision = decideSubagentRoute(input({
     globalConfig: {
       enabled: true,

@@ -145,6 +145,7 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
     executor: { provider: 'p', model: 'm', reasoningEffort: '' },
     executorStatus: 'active',
     executorCallsTotal: 0,
+    tierRouting: 'tier-rotate',
     allowlistKnown: true,
   }
   assert.equal(result.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
@@ -162,6 +163,11 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   assert.equal(result.safeParse({ ...full, pool: [] }).success, false, '退役的扁平 pool 应被拒绝')
   // 枚举值必须落在声明的取值内
   assert.equal(result.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
+  assert.equal(
+    result.safeParse({ ...full, tierRouting: 'guess' }).success,
+    false,
+    '非法 tierRouting 应被拒绝',
+  )
   // 档位缺 id/label 会被 strict 拒绝：客户端要靠它们渲染分组
   assert.equal(
     result.safeParse({ ...full, tiers: [{ pool: [] }] }).success,

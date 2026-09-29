@@ -26,7 +26,14 @@ import type {
   SessionOverrideConfig,
   ValueRouterConfig,
 } from './config.ts'
-import { isCompleteModelRoute, resolveEffectiveConfig, routableLines, routeKey, sanitizeExecutor } from './config.ts'
+import {
+  isCompleteModelRoute,
+  resolveEffectiveConfig,
+  routableLines,
+  routeKey,
+  sanitizeExecutor,
+  tierIndexOfRoute,
+} from './config.ts'
 import type { ChildRouteIntent } from './state.ts'
 
 /** 跳过路由的原因（用于日志与遥测）。 */
@@ -87,6 +94,8 @@ export type RouteDecision =
     reasoningEffort?: string
     /** 本次改写来自轮转池还是兜底线路。 */
     source: 'pool' | 'fallback'
+    /** 实际派发的档位下标；落在兜底线路时为 undefined。 */
+    tierIndex: number | undefined
     overrideSource: OverrideSource
     effective: ResolvedValueRouterConfig
   }
@@ -102,14 +111,14 @@ export function pickOverride(
 }
 
 /**
- * 选目标线路：在**最低档**（`tiers[0]`）的白名单放行线路里按序号轮转；无则用兜底线路。
+ * 选目标线路：在给定档位里按序号轮转；该档不可路由时依次向上尝试更高档，最后用兜底线路。
  *
- * 为什么只轮转最低档：用户的设计意图是「省 token 优先」——主控没指定线路时，
- * 默认落最便宜的档；更高档位由**主控显式指定**命中（提示词里给了选档准则）。
- * 副作用要知道：这样拿到的是**同档内的供应商多样性**，不是跨档多样性。
+ * `scopeIndex` 是**轮转作用域**的起点：
+ * - 主控显式点名了池内线路（tier-rotate 模式）→ 该线路所属的档位，即主控自己定了档；
+ * - 主控没指定 → 0，即最低档（省 token 优先）。
  *
- * 最低档自身无可路由线路时（例如全被白名单挡掉）依次尝试更高的档位，最后才用兜底线路
- * ——总比让子代理继承主模型（最贵的一条）强。
+ * 该档无可路由线路时（例如全被白名单挡掉）向上兜而不是直接掉到 executor，
+ * 总比让子代理继承主模型（最贵的一条）强。
  *
  * 轮转序号在会话首次观察时分配一次并固定（见 state.rotationIndexOf），
  * 因此同一子会话的多 step 请求永远落在同一条线上。
@@ -118,14 +127,18 @@ export function pickTargetRoute(
   tiers: readonly ResolvedTier[],
   executor: ResolvedModelRoute,
   rotationIndex: number,
-): { route: ResolvedPoolLine | ResolvedModelRoute; source: 'pool' | 'fallback' } {
-  for (const tier of tiers) {
+  scopeIndex = 0,
+): { route: ResolvedPoolLine | ResolvedModelRoute; source: 'pool' | 'fallback'; tierIndex: number | undefined } {
+  for (let offset = 0; offset < tiers.length; offset++) {
+    const index = scopeIndex + offset
+    const tier = tiers[index]
+    if (tier === undefined) break
     const usable = routableLines(tier.pool)
     if (usable.length === 0) continue
-    const index = ((rotationIndex % usable.length) + usable.length) % usable.length
-    return { route: usable[index]!, source: 'pool' }
+    const position = ((rotationIndex % usable.length) + usable.length) % usable.length
+    return { route: usable[position]!, source: 'pool', tierIndex: index }
   }
-  return { route: executor, source: 'fallback' }
+  return { route: executor, source: 'fallback', tierIndex: undefined }
 }
 
 /**
@@ -161,15 +174,26 @@ export function decideSubagentRoute(input: RouteDecisionInput): RouteDecision {
   const hasFallback = isCompleteModelRoute(executor)
   if (!hasPool && !hasFallback) return { route: false, reason: 'no-target' }
 
-  // B+1：主控显式指定过线路就尊重，不再改写。
-  if (isExplicitSelection(input.intent, effective.ambiguousPolicy)) {
-    return { route: false, reason: 'explicit-route' }
+  // B+1：主控是否显式指定过线路。
+  const explicit = isExplicitSelection(input.intent, effective.ambiguousPolicy)
+
+  // 轮转作用域：主控点名了池内线路 → 用它所属的档位（主控自己判难度定了档）；
+  // 没点名 → 最低档。点名的线路不在任何档位里，或处于 controller 模式 → 完全放行。
+  let scopeIndex = 0
+  if (explicit) {
+    if (effective.tierRouting === 'controller' || input.intent === undefined) {
+      return { route: false, reason: 'explicit-route' }
+    }
+    const found = tierIndexOfRoute(effective.tiers, input.intent.provider, input.intent.model)
+    if (found === undefined) return { route: false, reason: 'explicit-route' }
+    scopeIndex = found
   }
 
-  const { route: target, source: targetSource } = pickTargetRoute(
+  const { route: target, source: targetSource, tierIndex } = pickTargetRoute(
     effective.tiers,
     executor,
     input.rotationIndex ?? 0,
+    scopeIndex,
   )
 
   // 目标线路不可用：降级到兜底线路；兜底也没有就安全放行。
@@ -197,6 +221,8 @@ export function decideSubagentRoute(input: RouteDecisionInput): RouteDecision {
     model: chosen.model,
     ...(chosen.reasoningEffort ? { reasoningEffort: chosen.reasoningEffort } : {}),
     source: chosenSource,
+    /** 实际派发的档位下标；落在兜底线路时为 undefined。 */
+    tierIndex,
     overrideSource: source,
     effective: { ...effective, executor },
   }

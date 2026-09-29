@@ -7,7 +7,7 @@
  * 只暴露脱敏后的最小必要状态，不含提示词、请求内容或凭据。
  */
 
-import type { ModelRouteSelection, ResolvedTier, ValueRouterStrategy } from './config.ts'
+import type { ModelRouteSelection, ResolvedTier, TierRouting, ValueRouterStrategy } from './config.ts'
 
 export interface ValueRouterStatusSnapshot {
   /** 价值路由总开关。 */
@@ -26,6 +26,8 @@ export interface ValueRouterStatusSnapshot {
   executorReason?: string
   /** 已观测到的路由改写次数（宿主累计）。 */
   executorCallsTotal: number
+  /** 主控指定线路时的处置模式。 */
+  tierRouting: TierRouting
   /** 是否成功读到宿主白名单。false = 读不到，所有线路都被放行（宁可多派不静默清空）。 */
   allowlistKnown: boolean
 }
@@ -38,5 +40,6 @@ export const EMPTY_STATUS_SNAPSHOT: ValueRouterStatusSnapshot = {
   executor: { provider: '', model: '', reasoningEffort: '' },
   executorStatus: 'disabled',
   executorCallsTotal: 0,
+  tierRouting: 'tier-rotate',
   allowlistKnown: false,
 }

@@ -21,7 +21,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import { DEFAULT_AMBIGUOUS_POLICY, DEFAULT_CONFIG, DEFAULT_STRATEGY } from './config.ts'
+import { DEFAULT_AMBIGUOUS_POLICY, DEFAULT_CONFIG, DEFAULT_STRATEGY, DEFAULT_TIER_ROUTING } from './config.ts'
 
 /** 兜底线路 schema。 */
 const ModelRouteSchema = z.object({
@@ -35,13 +35,20 @@ const PoolLineSchema = z.object({
   provider: z.string().default('').volatile(),
   model: z.string().default('').volatile(),
   reasoningEffort: z.string().default('').volatile(),
-  tier: z.union(['cheap', 'mid', 'strong']).default('mid').volatile(),
+})
+
+/** 档位 schema。id/label 由 resolveTier 补齐，池内无上限。 */
+const TierSchema = z.object({
+  id: z.string().default('').volatile(),
+  label: z.string().default('').volatile(),
+  pool: z.array(PoolLineSchema).default([]).volatile(),
 })
 
 export const Config = z.object({
   enabled: z.boolean().default(DEFAULT_CONFIG.enabled).volatile(),
   strategy: z.union(['saver', 'balanced', 'powerful']).default(DEFAULT_STRATEGY).volatile(),
-  pool: z.array(PoolLineSchema).default([]).volatile(),
+  tiers: z.array(TierSchema).default([]).volatile(),
   executor: ModelRouteSchema,
   ambiguousPolicy: z.union(['rotate', 'respect']).default(DEFAULT_AMBIGUOUS_POLICY).volatile(),
+  tierRouting: z.union(['tier-rotate', 'controller']).default(DEFAULT_TIER_ROUTING).volatile(),
 })

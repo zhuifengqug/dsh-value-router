@@ -54,6 +54,7 @@ function dispatchGuidance(strategy: ValueRouterStrategy): string {
  * 继承主模型（事实确实如此，插件随后才会改写）。
  */
 function tierSegment(config: ResolvedValueRouterConfig): string {
+  const rotateInTier = config.tierRouting !== 'controller'
   const usableTiers = config.tiers
     .map(tier => ({ ...tier, pool: tier.pool.filter(line => line.allowed) }))
     .filter(tier => tier.pool.length > 0)
@@ -72,13 +73,13 @@ function tierSegment(config: ResolvedValueRouterConfig): string {
     '子代理线路池（按档位分组，档位顺序 = 成本从低到高）：',
     groups,
     '规则：',
+    '· **你负责判断任务难度并选档**：机械检索、批量改动、格式清理 → 最低档；',
+    '  需要设计判断或跨文件推理 → 中间的档；独立复核、安全关键结论、疑难根因 → 最高档。',
+    `· 怎么表达你选的档：**点名该档里的任意一条线路**即可（subagent 的 provider / model /`,
+    `  reasoning_effort 参数）。系统会认出它属于哪一档，然后${rotateInTier ? '在那一档内轮转派发' : '就用你点名的那条'}。`,
     '· 什么都不指定时，系统会从**最低档**的池子里按顺序轮转分配——并行的子代理因此',
     '  落在不同供应商上，既摊开额度，也避免思考盲区。',
-    '· 你也可以显式指定上面任意一条（subagent 的 provider / model / reasoning_effort 参数），',
-    '  用来选一个更高档的模型处理需要判断力的任务。',
     '· 不要指定清单以外的线路：指定了会被宿主直接拒绝，该次工具调用失败。',
-    '· 选档参考：机械检索、批量改动 → 最低档；需要设计判断或跨文件推理 → 中间档；',
-    '  独立复核、安全关键结论、疑难根因 → 最高档。',
     blocked > 0
       ? `· 另有 ${blocked} 条线路被宿主白名单挡住，未列在上表：它们不会被派发，你也不要指定。`
       : '',

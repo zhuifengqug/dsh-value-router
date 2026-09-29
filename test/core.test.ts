@@ -17,10 +17,10 @@ import {
 } from '../src/core/config.ts'
 import { EMPTY_STATUS_SNAPSHOT } from '../src/core/snapshot.ts'
 
-/** 归一化后配置的键集（0.4.0 新契约：恰好 5 个字段）。 */
-const CONFIG_KEYS = ['ambiguousPolicy', 'enabled', 'executor', 'strategy', 'tiers'] as const
+/** 归一化后配置的键集（0.5.0 新契约：恰好 6 个字段）。 */
+const CONFIG_KEYS = ['ambiguousPolicy', 'enabled', 'executor', 'strategy', 'tierRouting', 'tiers'] as const
 /** 状态快照的必填键集（executorReason 是唯一的可选键，缺省时不出现）。 */
-const SNAPSHOT_KEYS = ['allowlistKnown', 'enabled', 'executor', 'executorCallsTotal', 'executorStatus', 'strategy', 'tiers'] as const
+const SNAPSHOT_KEYS = ['allowlistKnown', 'enabled', 'executor', 'executorCallsTotal', 'executorStatus', 'strategy', 'tierRouting', 'tiers'] as const
 
 test('配置面契约：resolveConfig 输出恰好 5 个字段', () => {
   const c = resolveConfig(undefined)
@@ -66,6 +66,7 @@ test('状态快照契约：EMPTY_STATUS_SNAPSHOT 是服务未挂载时的安全�
   assert.equal(EMPTY_STATUS_SNAPSHOT.executorStatus, 'disabled')
   assert.equal(EMPTY_STATUS_SNAPSHOT.executorCallsTotal, 0)
   assert.equal(EMPTY_STATUS_SNAPSHOT.allowlistKnown, false, '未挂载时读不到白名单')
+  assert.equal(EMPTY_STATUS_SNAPSHOT.tierRouting, 'tier-rotate')
   assert.ok(!('executorReason' in EMPTY_STATUS_SNAPSHOT), '可选的 executorReason 缺省时不应出现')
   assert.ok(!('scope' in EMPTY_STATUS_SNAPSHOT), '0.2.0 起 scope 已随专属预设退役')
 })

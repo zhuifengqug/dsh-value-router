@@ -45,6 +45,7 @@ export interface ValueRouterStatusView {
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
   executorReason?: string
   executorCallsTotal: number
+  tierRouting: 'tier-rotate' | 'controller'
   allowlistKnown: boolean
 }
 
@@ -196,6 +197,7 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
     executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),
     ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),
     executorCallsTotal: num(raw.executorCallsTotal),
+    tierRouting: raw.tierRouting === 'controller' ? 'controller' : 'tier-rotate',
     allowlistKnown: raw.allowlistKnown !== false,
   }
 }

@@ -52,6 +52,19 @@ export type ValueRouterTier = 'cheap' | 'mid' | 'strong'
  */
 export type AmbiguousPolicy = 'rotate' | 'respect'
 
+/**
+ * 主控显式指定线路时的处置。
+ *
+ * - `tier-rotate`（默认，0.5.0）：主控点名的线路只用来**确定档位**，插件在该档内
+ *   按序号轮转派发。子代理工具没有「档位」参数，主控能传的只有 provider/model/
+ *   reasoning_effort，所以档位由「这条线属于哪一档」反推——插件查表即可，
+ *   不需要解析任何模型自由文本。
+ * - `controller`：主控指定了哪条就用哪条，完全不改（0.4.x 的 B+1 行为）。
+ *
+ * 两种模式下，主控**没指定**线路时的兜底都一样：最低档内轮转。
+ */
+export type TierRouting = 'tier-rotate' | 'controller'
+
 /** DSH 模型路由选择。 */
 export interface ModelRouteSelection {
   provider?: string
@@ -136,6 +149,8 @@ export interface ValueRouterConfig {
   /** 兜底线路：所有档位都不可路由时使用。 */
   executor?: ModelRouteSelection
   ambiguousPolicy?: AmbiguousPolicy
+  /** 主控显式指定线路时：按档位轮转（默认）还是完全尊重。 */
+  tierRouting?: TierRouting
 }
 
 /** 归一化后的配置：所有字段必填。 */
@@ -145,10 +160,12 @@ export interface ResolvedValueRouterConfig {
   tiers: ResolvedTier[]
   executor: ResolvedModelRoute
   ambiguousPolicy: AmbiguousPolicy
+  tierRouting: TierRouting
 }
 
 export const DEFAULT_STRATEGY: ValueRouterStrategy = 'balanced'
 export const DEFAULT_AMBIGUOUS_POLICY: AmbiguousPolicy = 'rotate'
+export const DEFAULT_TIER_ROUTING: TierRouting = 'tier-rotate'
 
 /** 默认配置（`resolveConfig(undefined)` 的结果）。 */
 export const DEFAULT_CONFIG: ResolvedValueRouterConfig = {
@@ -157,6 +174,7 @@ export const DEFAULT_CONFIG: ResolvedValueRouterConfig = {
   tiers: [],
   executor: { provider: '', model: '', reasoningEffort: '' },
   ambiguousPolicy: DEFAULT_AMBIGUOUS_POLICY,
+  tierRouting: DEFAULT_TIER_ROUTING,
 }
 
 // —————————————————————————— 归一化辅助 ——————————————————————————
@@ -313,7 +331,29 @@ export function resolveConfig(raw: Partial<ValueRouterConfig> | undefined | null
     tiers: resolveTiers(c),
     executor: resolveModelRoute(c.executor),
     ambiguousPolicy: oneOf(c.ambiguousPolicy, ['rotate', 'respect'] as const, DEFAULT_AMBIGUOUS_POLICY),
+    tierRouting: oneOf(c.tierRouting, ['tier-rotate', 'controller'] as const, DEFAULT_TIER_ROUTING),
   }
+}
+
+/**
+ * 反查一条线路属于哪个档位——这是「主控定档」得以成立的关键。
+ *
+ * 子代理工具没有「档位」参数，主控只能点名具体线路；插件靠查表把线路映射回档位。
+ * **同一条线路出现在多个档位时取最靠前（成本最低）的那个**：主控点名它通常是在表达
+ * 「这条够用」，把它派到更贵的档位是反直觉的。
+ *
+ * @returns 命中的档位下标；不在任何档位里则返回 undefined
+ */
+export function tierIndexOfRoute(
+  tiers: readonly ResolvedTier[],
+  provider: string,
+  model: string,
+): number | undefined {
+  const key = routeKey(provider, model)
+  for (const [index, tier] of tiers.entries()) {
+    if (tier.pool.some(line => routeKey(line.provider, line.model) === key)) return index
+  }
+  return undefined
 }
 
 // —————————————————————————— 路由/会话辅助 ——————————————————————————

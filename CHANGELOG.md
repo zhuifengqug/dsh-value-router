@@ -5,6 +5,39 @@
 
 ---
 
+## 0.5.0 — 2026-09-29
+
+**主控判难度 → 定档 → 档内轮转。** 这是用户想要的最终形态。
+
+### Added
+
+- **`tierRouting` 设置（默认 `tier-rotate`）**，决定主控显式指定线路时插件怎么处置：
+  - `tier-rotate`：主控点名的线路**只用来确定档位**，插件在该档内按序号轮转派发；
+  - `controller`：主控指定哪条就用哪条，完全不改（0.4.x 的行为）。
+  / **`tierRouting` (default `tier-rotate`)**: how an explicit controller selection is
+  handled — rotate within the tier it names, or honour the exact route.
+- **`tierIndexOfRoute()`**：把一条线路反查回它所属的档位。
+  子代理工具**没有「档位」参数**（只有 `provider` / `model` / `reasoning_effort`），
+  所以「主控定档」只能靠查表实现——**不需要解析任何模型自由文本**。
+  同一条线路出现在多个档位时取**最靠前（成本最低）**的：主控点名它通常是在表达
+  「这条够用」，派到更贵的档位是反直觉的。
+  / **Reverse lookup from a route to its tier.** No free-text parsing is involved.
+- 提示词改为直接教主控：**你负责判断任务难度并选档；点名该档里的任意一条线路即可**，
+  系统会认出它属于哪一档并在该档内轮转。
+- 设置卡新增「主控选档的处理」区（按档位轮转 / 完全尊重主控）。
+- 状态快照与 typert 契约新增 `tierRouting`；路由决策返回 `tierIndex`（实际派发的档位）。
+
+### Changed
+
+- **兜底轮转的起点从固定的最低档变成「轮转作用域」**：
+  主控点名了池内线路 → 从那一档开始轮转；没点名 → 从最低档开始。
+  作用域档位无可路由线路时依次向上尝试更高档，最后才用兜底线路。
+  / **The rotation scope is now dynamic**: the tier the controller named, else the lowest.
+- 0.4.0 的「只轮转最低档」在 `tier-rotate` 模式下不再是无条件限制——**它只作用于
+  主控没指定线路的情形**。
+
+---
+
 ## 0.4.0 — 2026-09-29
 
 扁平轮转池 → **用户自定义的档位列表**。本版本同时修掉了 0.3.0 遗留的一个阻断性缺陷。
@@ -203,6 +236,19 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.5.0 — 2026-09-29
+
+**Controller judges difficulty → picks a tier → rotation happens inside that tier.**
+
+**Added:** `tierRouting` (default `tier-rotate`) and `tierIndexOfRoute()`. The subagent
+tool has no "tier" parameter — only `provider` / `model` / `reasoning_effort` — so the
+tier is derived by looking the named route up in the tier tables. No free-text parsing
+is involved. A route present in several tiers resolves to the cheapest one. The prompt
+now tells the controller directly: judge the difficulty, name any route in that tier.
+
+**Changed:** the rotation scope is dynamic — the tier the controller named, else the
+lowest tier — instead of always the lowest tier.
 
 ## 0.4.0 — 2026-09-29
 

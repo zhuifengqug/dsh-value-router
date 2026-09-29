@@ -486,6 +486,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         executorStatus: executorHealth.status,
         ...(executorHealth.reason !== undefined ? { executorReason: executorHealth.reason } : {}),
         executorCallsTotal: valueRouterState.getGlobalMetrics().executorCalls,
+        tierRouting: c.tierRouting,
         allowlistKnown: hostAllowlist() !== undefined,
       }
     },
