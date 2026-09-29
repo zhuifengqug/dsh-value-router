@@ -38,17 +38,16 @@
   max-height: calc(100dvh - 68px) !important;
 }
 
+/* 引导气泡同样跟随宿主主题：原先是硬编码的深色渐变，在浅色应用里像一块贴错地方的补丁。 */
 .onboardingPopover {
   width: min(420px, calc(100vw - 24px)) !important;
   max-width: calc(100vw - 24px) !important;
   padding: 18px !important;
   gap: 14px !important;
-  border-color: rgba(96, 165, 250, 0.3) !important;
+  border-color: var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.22)) !important;
   border-radius: 14px !important;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(59, 130, 246, 0.16), transparent 42%),
-    linear-gradient(145deg, #1c2432 0%, #18181b 72%) !important;
-  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(96, 165, 250, 0.06) !important;
+  background: var(--dsw-alias-bg-layer-1, var(--dsh-surface-primary, #fff)) !important;
+  box-shadow: 0 20px 55px rgba(0, 0, 0, 0.28) !important;
 }
 
 /* The blank-session guide is mounted directly under body, so it does not
@@ -67,7 +66,7 @@
 }
 
 .setupEyebrow {
-  color: #7dd3fc;
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -76,7 +75,7 @@
 
 .setupTitle {
   margin: 4px 0 0;
-  color: #f8fafc;
+  color: var(--dsw-alias-label-primary, #1f2329);
   font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -87,10 +86,10 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.25));
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #cbd5e1;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.08));
+  color: var(--dsw-alias-label-secondary, #5b6472);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
@@ -104,7 +103,7 @@
 
 .setupLead {
   margin: -2px 0 0;
-  color: #cbd5e1;
+  color: var(--dsw-alias-label-secondary, #5b6472);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -121,15 +120,15 @@
   align-items: start;
   gap: 10px;
   padding: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.2));
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.52);
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.06));
   transition: border-color 0.16s, background 0.16s;
 }
 
 .setupStepReady {
-  border-color: rgba(52, 211, 153, 0.3);
-  background: rgba(6, 78, 59, 0.18);
+  border-color: var(--dsw-alias-state-success-primary, #0a7b4e);
+  background: var(--dsw-alias-state-success-surface, rgba(16, 185, 129, 0.1));
 }
 
 .setupStepNumber {
@@ -138,16 +137,16 @@
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: rgba(96, 165, 250, 0.16);
-  color: #93c5fd;
+  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.12));
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
 
 .setupStepReady .setupStepNumber {
-  background: rgba(52, 211, 153, 0.16);
-  color: #6ee7b7;
+  background: var(--dsw-alias-state-success-surface, rgba(16, 185, 129, 0.16));
+  color: var(--dsw-alias-state-success-primary, #0a7b4e);
 }
 
 .setupStepBody {
@@ -155,7 +154,7 @@
 }
 
 .setupStepHeading {
-  color: #f8fafc;
+  color: var(--dsw-alias-label-primary, #1f2329);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.35;
@@ -164,7 +163,7 @@
 .setupStepValue {
   margin-top: 3px;
   overflow: hidden;
-  color: #93c5fd;
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
   text-overflow: ellipsis;
@@ -173,7 +172,7 @@
 
 .setupDefaultNote {
   margin-top: 3px;
-  color: #94a3b8;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
   font-size: 10px;
   line-height: 1.4;
 }
@@ -190,7 +189,7 @@
 }
 
 .setupStrategyLabel {
-  color: #cbd5e1;
+  color: var(--dsw-alias-label-secondary, #5b6472);
   font-size: 11px;
   font-weight: 700;
 }
@@ -205,7 +204,7 @@
 
 .setupHint {
   min-width: 0;
-  color: #64748b;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
   font-size: 10px;
   line-height: 1.4;
 }
@@ -217,12 +216,13 @@
   font-size: 11px;
 }
 
+/* 错误用宿主的 danger token，不用写死的暗红——浅色下暗红底是黑块。 */
 .setupError {
   padding: 8px 10px;
-  border: 1px solid rgba(248, 113, 113, 0.35);
+  border: 1px solid var(--dsw-alias-state-danger-primary, #c0392b);
   border-radius: 8px;
-  background: rgba(127, 29, 29, 0.2);
-  color: #fca5a5;
+  background: var(--dsw-alias-state-danger-surface, rgba(220, 38, 38, 0.1));
+  color: var(--dsw-alias-state-danger-primary, #c0392b);
   font-size: 11px;
   line-height: 1.45;
 }

@@ -263,30 +263,32 @@
   text-align: right;
 }
 
-/* Header Status Chip & Popover */
+/* Header Status Chip & Popover
+   这一段原先硬编码深色（#18181b / #9ca3af / #bfdbfe…），在浅色设置面板里像一块补丁。
+   现在统一走宿主 token，跟随应用明暗主题——气泡不在"另一个世界"，它就挂在顶栏上。 */
 .headerChip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   padding: 2px 8px;
   border-radius: 12px;
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  color: #93c5fd;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.1));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.25));
+  color: var(--dsw-alias-label-primary, #1f2329);
   font-size: 12px;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
 }
 
 .headerChip:hover {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: rgba(59, 130, 246, 0.4);
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.18));
+  border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
 }
 
 .headerChipDisabled {
-  background: rgba(156, 163, 175, 0.1);
-  border-color: rgba(156, 163, 175, 0.2);
-  color: #9ca3af;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.06));
+  border-color: var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.16));
+  color: var(--dsw-alias-label-tertiary, #6b7280);
 }
 
 /* 徽章内部：标签 / 本会话派发次数 / 池规模，三段用轻量分隔，避免挤成一行字 */
@@ -316,8 +318,9 @@
 .chipTag {
   padding: 0 5px;
   border-radius: 999px;
-  border: 1px solid rgba(147, 197, 253, 0.45);
-  color: #bfdbfe;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.25));
+  background: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.08));
+  color: var(--dsw-alias-label-tertiary, #6b7280);
   font-size: 10px;
   line-height: 1.5;
   white-space: nowrap;
@@ -328,85 +331,97 @@
   top: 100%;
   right: 0;
   margin-top: 6px;
-  width: 320px;
-  background: #18181b;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 8px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  width: 340px;
+  background: var(--dsw-alias-bg-layer-1, var(--dsh-surface-primary, #fff));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.22));
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
   z-index: 1000;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-size: 12px;
 }
 
 .popoverItem {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  gap: 12px;
+  line-height: 1.7;
 }
 
 .popoverItemLabel {
-  color: #9ca3af;
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
 }
 
 .popoverItemValue {
-  color: #ffffff;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
   font-weight: 500;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  overflow-wrap: anywhere;
 }
 
 .roleSummary {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   padding: 10px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.14));
+  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(127, 127, 127, 0.14));
 }
 
-/* Scope Switcher */
+/* 全局默认 / 仅本会话 的分段控件 */
 .scopeSwitcher {
   display: flex;
-  background: rgba(0, 0, 0, 0.3);
   padding: 2px;
-  border-radius: 6px;
+  border-radius: 7px;
   gap: 2px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.08));
 }
 
 .scopeButton {
   flex: 1;
-  padding: 4px 6px;
+  padding: 5px 6px;
   font-size: 11px;
-  border-radius: 4px;
+  border-radius: 5px;
   border: none;
   background: transparent;
   color: var(--dsw-alias-label-tertiary, #6b7280);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.15s, color 0.15s;
   text-align: center;
 }
 
+.scopeButton:hover:not(.scopeButtonActive) {
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.14));
+}
+
 .scopeButtonActive {
-  background: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
-  color: #ffffff;
-  font-weight: 500;
+  background: var(--dsw-alias-bg-layer-1, var(--dsh-surface-primary, #fff));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.22));
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-weight: 600;
 }
 
 /* Stats Card in Popover */
 .statsCard {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
-  padding: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 6px;
+  gap: 8px;
 }
 
 .statItem {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.06));
 }
 
 .statItemLabel {
@@ -415,19 +430,10 @@
 }
 
 .statItemValue {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--dsw-alias-brand-primary, #0b6bcb);
-}
-
-/* 徽章上的 scope 标记 */
-.scopeTag {
-  padding: 0 5px;
-  border-radius: 999px;
-  border: 1px solid rgba(147, 197, 253, 0.45);
-  color: #bfdbfe;
-  font-size: 10px;
-  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary, #1f2329);
 }
 
 /* 设置卡的文本 / 下拉输入与字段提示 */
