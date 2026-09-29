@@ -5,7 +5,109 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { valueRouterState } from '../src/core/state.ts'
+import { valueRouterState, routeKey, type ChildRouteIntent } from '../src/core/state.ts'
+
+function intentOf(provider: string, model: string, parentRoute?: string): ChildRouteIntent {
+  return {
+    provider,
+    model,
+    observedAt: { turn: 0, step: 0 },
+    parentRoute,
+    source: 'first-seen',
+  }
+}
+
+// —— 轮转序号：本次迭代的核心状态 ——
+
+test('轮转序号：同一子会话在生命周期内只分配一次（多 step 不得跳模型）', () => {
+  // 这是防止「同一段对话历史由不同模型生成」的关键：序号若在每个 request 上递增，
+  // 多 step 子代理会在 step 之间换模型，宿主会插入 model-switch notice。
+  valueRouterState.resetAll()
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'p'), 0)
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'p'), 0, '第二次观察必须拿到同一个序号')
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'p'), 0)
+})
+
+test('轮转序号：同一父会话下按子会话创建顺序递增 0,1,2', () => {
+  valueRouterState.resetAll()
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'parent'), 0)
+  assert.equal(valueRouterState.rotationIndexOf('c2', 'parent'), 1)
+  assert.equal(valueRouterState.rotationIndexOf('c3', 'parent'), 2)
+  // 不同父会话各自从 0 开始
+  assert.equal(valueRouterState.rotationIndexOf('c4', 'other'), 0)
+})
+
+test('轮转序号：父会话缺失时退化为进程级单调计数', () => {
+  valueRouterState.resetAll()
+  assert.equal(valueRouterState.rotationIndexOf('c1', undefined), 0)
+  assert.equal(valueRouterState.rotationIndexOf('c2', undefined), 1)
+  assert.equal(valueRouterState.rotationIndexOf('c1', undefined), 0, '已有槽位不重新分配')
+})
+
+// —— 线路意图快照 ——
+
+test('线路意图：只记录第一次，后续不覆盖（否则会被自己的改写结果污染）', () => {
+  valueRouterState.resetAll()
+  valueRouterState.rememberIntent('c1', intentOf('main', 'main-model', 'main/main-model'))
+  valueRouterState.rememberIntent('c1', intentOf('hijacked', 'other-model', 'main/main-model'))
+  const intent = valueRouterState.intentFor('c1')
+  assert.equal(intent?.provider, 'main')
+  assert.equal(intent?.model, 'main-model')
+})
+
+test('attachParentRoute：可补写父线路，但已补过的不再改', () => {
+  valueRouterState.resetAll()
+  valueRouterState.rememberIntent('c1', intentOf('sub', 'sub-model'))
+  assert.equal(valueRouterState.intentFor('c1')?.parentRoute, undefined)
+
+  valueRouterState.attachParentRoute('c1', 'main/main-model')
+  assert.equal(valueRouterState.intentFor('c1')?.parentRoute, 'main/main-model')
+
+  valueRouterState.attachParentRoute('c1', 'other/other-model')
+  assert.equal(valueRouterState.intentFor('c1')?.parentRoute, 'main/main-model', '不应被二次改写')
+})
+
+test('attachParentRoute：父线路为 undefined 或会话不存在时是安全的空操作', () => {
+  valueRouterState.resetAll()
+  assert.doesNotThrow(() => valueRouterState.attachParentRoute('ghost', 'main/main-model'))
+  valueRouterState.rememberIntent('c1', intentOf('sub', 'sub-model'))
+  assert.doesNotThrow(() => valueRouterState.attachParentRoute('c1', undefined))
+  assert.equal(valueRouterState.intentFor('c1')?.parentRoute, undefined)
+})
+
+test('clearIntent 同时清掉轮转槽位', () => {
+  valueRouterState.resetAll()
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'p'), 0)
+  valueRouterState.rememberIntent('c1', intentOf('a', 'b'))
+  valueRouterState.clearIntent('c1')
+  assert.equal(valueRouterState.intentFor('c1'), undefined)
+  // 槽位已清 → 重新分配时会拿到父会话计数器的下一个值（而不是沿用旧的 0）
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'p'), 1)
+})
+
+test('pruneIntents：超过上限时按 FIFO 淘汰最老的', () => {
+  valueRouterState.resetAll()
+  for (let i = 0; i < 5; i++) valueRouterState.rememberIntent(`c${i}`, intentOf('p', 'm'))
+  assert.equal(valueRouterState.pruneIntents(3), 2)
+  assert.equal(valueRouterState.intentFor('c0'), undefined)
+  assert.equal(valueRouterState.intentFor('c1'), undefined)
+  assert.ok(valueRouterState.intentFor('c4'))
+  assert.equal(valueRouterState.pruneIntents(10), 0, '未超上限时是空操作')
+  valueRouterState.resetAll()
+})
+
+test('routeKey 归一化线路标识', () => {
+  assert.equal(routeKey('p', 'm'), 'p/m')
+})
+
+test('resetAll 清空轮转与意图', () => {
+  valueRouterState.resetAll()
+  valueRouterState.rotationIndexOf('c1', 'parent')
+  valueRouterState.rememberIntent('c1', intentOf('a', 'b'))
+  valueRouterState.resetAll()
+  assert.equal(valueRouterState.intentFor('c1'), undefined)
+  assert.equal(valueRouterState.rotationIndexOf('c1', 'parent'), 0)
+})
 
 test('会话覆写：写入 / 读取 / 清除', () => {
   valueRouterState.resetAll()

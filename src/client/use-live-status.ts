@@ -11,22 +11,29 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ModelRouteSelection, SessionOverrideConfig, ValueRouterScope, ValueRouterStrategy } from '../core/config.ts'
+import type { ModelRouteSelection, SessionOverrideConfig, ValueRouterStrategy } from '../core/config.ts'
 
 const REMOTE_PACKAGE = '@gjs27/dsh-value-router'
 const REMOTE_TYPES = `${REMOTE_PACKAGE}/types`
 const REMOTE_SERVICE = 'valueRouterStatus'
 
 /**
- * 只读状态快照的浏览器侧视图（src/core/snapshot.ts 的线上形状镜像，7 个字段）。
+ * 只读状态快照的浏览器侧视图（src/core/snapshot.ts 的线上形状镜像）。
  *
  * tsconfig.client.json 只收录 src/client/** 与 src/core/**，这里保留一份结构性
  * 镜像，避免客户端工程越过自己的文件边界。
  */
+export interface ValueRouterPoolLineView {
+  provider: string
+  model: string
+  reasoningEffort: string
+  tier: 'cheap' | 'mid' | 'strong'
+}
+
 export interface ValueRouterStatusView {
   enabled: boolean
-  scope: ValueRouterScope
   strategy: ValueRouterStrategy
+  pool: ValueRouterPoolLineView[]
   executor: ModelRouteSelection
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
   executorReason?: string
@@ -139,6 +146,19 @@ function asRoute(value: unknown): { provider: string; model: string; reasoningEf
   }
 }
 
+/** 轮转池的单条线路视图（宿主可能送来半残数据，逐项兜底）。 */
+function asPoolLine(value: unknown): ValueRouterPoolLineView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return undefined
+  return {
+    provider: raw.provider,
+    model: raw.model,
+    reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
+    tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
+  }
+}
+
 /** 只保留本插件拥有的最小数据对象，不持有任何宿主对象引用。 */
 function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -146,8 +166,10 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   if (typeof raw.enabled !== 'boolean' || typeof raw.strategy !== 'string') return undefined
   return {
     enabled: raw.enabled,
-    scope: oneOf(raw.scope, ['preset', 'global'] as const, 'preset'),
     strategy: oneOf(raw.strategy, ['saver', 'balanced', 'powerful'] as const, 'balanced'),
+    pool: Array.isArray(raw.pool)
+      ? raw.pool.map(asPoolLine).filter((line): line is ValueRouterPoolLineView => line !== undefined)
+      : [],
     executor: asRoute(raw.executor),
     executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),
     ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),

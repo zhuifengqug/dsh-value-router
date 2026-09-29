@@ -1,151 +1,199 @@
 # @gjs27/dsh-value-router —— 价值路由（Value Router）
 
-DSH 会话内的**成本感知协作层**：主模型（用户在预设/会话里选的那个）负责调控与交付，插件只做一条确定性的分流——**子代理路由**：
+DSH 会话内的**成本感知 + 多模型协作层**。主模型（你在会话里选的那个）负责理解、拆解、
+审查与最终交付；插件只做一件事——**决定每个子代理跑在哪个模型上**：
 
-| 通道 | 触发条件 | 去向 | 机制 |
-| --- | --- | --- | --- |
-| **子代理路由**（唯一通道） | 带工具的、可拆分的子任务（subagent / subagent_fork / workflow worker） | 便宜的 DSH executor 模型（复用 DSH 已配置 provider） | host 侧拦截 `agent/request`，只改写 `origin === 'subagent'` 的会话 |
+| 场景 | 去向 | 机制 |
+| --- | --- | --- |
+| 主控**显式指定**了线路（且不同于父模型） | 该线路，放行不改写 | host 侧拦截 `agent/request` |
+| 主控**没指定** + 轮转池非空 | `pool[N % 池长]`，N = 该父会话下的第 N 个子代理 | 同上 |
+| 池为空，或池中目标线路的 provider 不可用 | 兜底线路 `executor` | 同上 |
+| 主会话 / 用户手动开的会话 | **永不改写** | 同上 |
 
-一句话：**主模型永不被接管**；带工具的子任务自动下沉给 executor 子代理。插件**不注册任何工具**，只做子代理路由。
+一句话：**主模型永不被接管；没指定线路的子代理按池轮转，于是并行的子代理天然跑在不同模型上。**
+插件**不注册任何工具**，只做子代理线路分配。
 
-本包由两款插件合并而来：
-
-- `@gjs27/dsh-deepseek-web-delegate`（其外发通道已整体退役，详见文末「退役记录」）
-- `@linxin666/dsh-value-mode`（模型分层路由、三档策略、顶栏徽章/气泡/引导/设置卡、路由遥测）
-
-合并时**删除**了 value-mode 的 expert 主控路由语义（expert 配置、expert 健康检查、专家会话覆写、`autoReviewKeywords`、`consult_expert` 工具全部移除，不保留兼容导出）。
+> **0.2.0 变更**：专属预设已摘除，改为设置里的全局开关，对**全部预设**生效。
+> 详见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 
-## 1. 生效范围（scope）
+## 1. 为什么是「轮转」而不是「全用一个」
 
-| scope | 生效对象 | 说明 |
+把子代理都赶到同一个便宜模型上省钱，但有两个真实代价：
+
+- **思考盲区**：同一模型对同一类问题有稳定的偏好与盲点，多个子代理得出的结论会高度同质；
+  换模型交叉验证才能补上这块。
+- **并发瓶颈**：并行子代理全压在一条线路上，吞吐受单 provider 的限流约束；而且单点故障
+  直接让整批子任务失败。
+
+轮转同时解决这两点：**第 1 个子代理走池[0]，第 2 个走池[1]，第 3 个走池[0]…**
+并行批次天然落在不同模型上，限流也被摊开。
+
+### 轮转序号是每会话一次，不是每请求递增
+
+这是最容易做错的地方。序号在**子会话首次被观察时分配一次**并固定下来。原因：
+若在每个 `agent/request` 上递增，一个多 step 的子代理会在 step 之间换模型——同一段对话
+历史由不同模型生成，宿主会插入 model-switch notice，模型看到自己上文的"风格突变"，
+体验与一致性都会崩。
+
+验收判据写在测试里：`test/state.test.ts` 的「同一子会话在生命周期内只分配一次」。
+
+### Agent Team 成员也在轮转里
+
+队友是 provider-owned subagent child（走 `startContinuable`，`origin` 固定为 `'subagent'`），
+所以插件**不需要、也无法**区分队友与普通子代理——而这恰恰是好事：轮转对两者一视同仁，
+队友自然就分散到不同模型了。
+
+宿主**不支持**逐成员指定模型（`spawn_teammate` 的参数只有 `name` / `description` /
+`prompt` / `context`；队友 provider 来自插件静态配置 `freshProvider` / `forkProvider`）。
+要按角色精确分配，得等宿主加模型入口。
+
+## 2. 配置项
+
+```yaml
+value-router:
+  enabled: true                    # 总开关
+  strategy: balanced               # 派发倾向：saver | balanced | powerful
+  pool:                            # 轮转线路池，最多 4 条
+    - provider: hetu
+      model: deepseek-v4.1-flash
+      tier: cheap                  # cheap | mid | strong（仅用于文案与 UI，不参与路由）
+    - provider: commandcode
+      model: z-ai/glm-5.3-flash
+      tier: mid
+    - provider: commandcode
+      model: stealth/space-bunny-alpha
+      tier: strong
+  executor:                        # 兜底线路：池为空 / 目标 provider 不可用时
+    provider: hetu
+    model: deepseek-v4.1-flash
+    reasoningEffort: ''
+  ambiguousPolicy: rotate           # rotate | respect，默认 rotate
+```
+
+### 为什么 `executor` 不能删
+
+它是**兜底线路**，只在两种情况生效：轮转池为空、或池中目标线路的 provider 不可用。
+宿主**不提供任何默认 executor**——`dsh-tool-subagent` 的合并逻辑是
+`requested?.provider ?? parentOptions.provider`：主控不显式指定模型时，子代理
+**直接继承主模型**，也就是最贵的那条。所以池一旦为空而插件又没有兜底，降本目标就整个失效。
+
+### `ambiguousPolicy` 处置的是什么
+
+宿主层有一组**固有的不可区分性**：`next()` 只能给出"本次请求实际会用的线路"，
+分不清下面两种情况——
+
+| 情形 | `next()` 的值 | 真实意图 |
 | --- | --- | --- |
-| `preset`（默认） | 仅当前预设为 `value-router` 的会话 | 插件会把自带预设同步到 `<DSH_HOME>/.agent-presets/value-router`，在模式选择器里显示为「价值路由」 |
-| `global` | 所有预设（可用 `excludePresets` 排除） | 提示注入所有会话；所有子代理会话都被路由 |
+| 主控没指定，子代理继承父模型 | = 父线路 | 交给轮转 |
+| 主控显式指定了**和父模型一样**的线路 | = 父线路 | 尊重主控 |
 
-两种 scope 下都遵守同一条硬约束：**`origin !== 'subagent'` 的会话一律不改写 provider/model**（主会话、用户手动开的会话都不受影响）。
+- `rotate`（默认）：当作没指定 → 走轮转。省 token，符合本插件的存在目的；
+  风险是主控极少见的"显式指定同款"会被改写。
+- `respect`：当作显式指定 → 放行保留继承。绝不擅自改动主控明确写下的东西。
 
-### 「当前预设」怎么判定（踩过坑，勿改回 header）
+线路**不同于**父线路时无歧义，一律认定为主控显式指定并放行。
 
-DSH 里 `session.header.agentPreset` 是**会话创建时**的预设且**不可变**；切换预设走的是 `agent-preset/selected` 事件——`AgentPresets.swap()` 会先 `recompose(agent.ctx)`，再追加该事件推进 `agentPreset` **投影**（见 `dsh-agent-presets/lib/index.js` 的 `agentPresetProjectionDefinition` 注释：*"The creation header names the preset a session STARTED with… Reconstruction reads the `agentPreset` Session projection, never the header"*）。
+## 3. 派发倾向（strategy）
 
-所以本插件按 **实时组合（`agentPresets.composedPreset(agent.ctx)`）→ 会话投影（`sessionProjections.stateOf(session,'agentPreset')`）→ 创建 header** 的优先级取值（`src/core/routing.ts` 的 `resolveCurrentPreset`）。只读创建 header 会出现「新建 standard 会话 → 切成价值路由」的会话被永久判定为不在范围内：提示段不注入、路由被 `scope` 静默跳过，表现为**选了预设却一次都不派子代理**。
+档位**只改写注入主模型的提示词**，不改变线路分配：
 
-### 使用要点
-
-- **在发第一条消息前选好预设**：DSH 的预设切换在会话首轮之后会被锁死（`agent-preset/locked`），所以新会话请在模式选择器里先选「价值路由」，再发消息。
-- 想省事就把默认预设设成它：设置里的「默认模式」（对应 `settings.yaml` 的 `agent-presets.default`）改成 `value-router`，新会话直接就在该模式下。
-- 与内置的 `subagent-model-selection`（会话级子代理模型白名单）**语义重叠**：本插件会在 `agent/request` 里把子代理会话改写成配置的 executor，覆盖调用时选的模型。若两者同时启用，建议把 executor 也加进那个白名单，避免两套策略互相打架。
-
-## 2. 三档策略（strategy）
-
-档位**只影响注入主模型的派发提示文案的积极程度**，不改变路由机制本身：
-
-| 档位 | 行为 |
+| 档位 | 提示词行为 |
 | --- | --- |
-| `saver`（更省） | 文案更保守，少派发 |
-| `balanced`（平衡，默认） | 命中「多文件调查 / 可并行拆分 / 批量机械改动 / 需独立复核」的子任务优先派发 |
-| `powerful`（更强） | 复杂架构与疑难根因积极派发，并要求给出证据 |
+| `saver`（更省） | 少派发；优先自己直接处理，除非能明确拆分、需并行调查或确实高耗时 |
+| `balanced`（平衡，默认） | 命中「多文件调查 / 可并行拆分 / 批量机械改动 / 需独立复核」即优先派发 |
+| `powerful`（更强） | 复杂架构、疑难根因、安全关键逻辑积极派发，并要求返回证据 |
 
-与档位无关的固定事实：子代理不再派生子代理（预设里 `tool-subagent` / `tool-subagent-fork` 自身的 `maxDepth: 1`）。
+三档都带同一条硬约束句：**不得以「来不及 / 太麻烦」为由回避派发**。
 
-## 3. 单通道的关闭与安全放行
+### 「独立复核走强模型」不是强制
 
-只有一条子代理通道，以下情况通道关闭或放行，**绝不因本插件让会话失败**：
+宿主 `agent/request` 的 payload 只有 `{agent, turn, step, signal}`——**没有任务描述**。
+判断"这是不是复核类任务"是语义判断，只有主控模型自己知道，插件在路由层拿不到。
+因此本插件在提示词里给出**选档建议**，但**不声称强制**，也不做关键词匹配硬改写
+（模型自由文本上的关键词匹配误判率高且难排查）。
 
-| 情况 | 行为 |
+## 4. 安全放行
+
+以下情况一律放行普通路由，**绝不因本插件让会话失败**：
+
+| 情况 | 决策原因 |
 | --- | --- |
-| executor 半配置（只填 provider 或只填 model） | 被设置校验**拒绝写入**，配置无法保存 |
-| executor 两字段皆空（合法状态，默认） | 通道关闭，决策原因 `executor-incomplete`，插件照常加载 |
-| executor provider 不在当前 LLM 运行时（`ctx.llm.listProviders()`） | 记 `executor-unavailable`，安全放行普通 DSH 路由 |
-| 插件整体 `enabled=false` | 关闭（提示段也不注入） |
+| 总开关关闭 | `disabled` |
+| `origin !== 'subagent'`（**第一位，不可绕过**） | `not-subagent` |
+| 池为空且兜底线路未配置 | `no-target` |
+| 主控显式指定了线路 | `explicit-route` |
+| 兜底线路半配置（只填一边） | sanitize 成未配置 → `no-target` |
+| 目标线路 provider 不可用且无兜底 | `executor-unavailable` |
+| 目标线路与当前一致 | `noop`（不改写、不计数） |
 
-## 4. 工具
+**半配置不抛错**：0.1.7-rc.2 删除了插件可注册的 settings `validate` 回调，
+抛错会让整个插件树加载失败。半配置一律 sanitize 成"未配置"并记一条 warn。
 
-本插件**不注册任何工具**。历史上曾注册过外发类工具，已于 2026-09-22 随外发通道一并删除，见「退役记录」。
+## 5. 与宿主 `subagent-model-selection` 的关系
 
-## 5. 界面与状态快照
+宿主自带子代理模型白名单（`subagent-model-selection-settings.allowedModels`），
+语义是**授权**："子代理*可以*用哪些模型"。本插件的 `pool` 语义是**路由**："该派谁"。
+两者是**两份独立配置**，不会自动同步，但**时序不同所以不会打架**：
 
-- **顶栏徽章**（`conversation.session.header.actions`）：策略 / scope / executor / executor 健康 / 本会话 executor 调用次数 / 累计调用次数；
-- **快捷气泡**：会话级覆写（`enabled` / `strategy` / `executor`）——「全局默认 ↔ 仅本会话」，只影响本会话、不写回全局设置，可一键重置；
-- **首次引导**：选 executor + 策略 + scope；
-- **设置卡**（`settings.plugin.item`）：路由区（开关 / scope / 排除清单 / 策略 / executor 选择 / executor 健康）。
+- 宿主在子代理**创建前**校验工具参数（`assertAllowedModelSelection`）；
+- 插件在**创建后**的 `agent/request` 改写，宿主根本看不到插件选的线路。
 
-状态快照（Remote `valueRouterStatus`）：
+最坏情况：主控显式指定了宿主白名单外的线路 → 宿主抛 `gateway/bad-request`，
+该次工具调用失败。提示词里已明确"只能从清单里挑"来降低发生率。
+若你希望插件只使用宿主放行的线路，把两者配成一致的子集即可。
 
-- `status` → `{ enabled, scope, strategy, executor, executorStatus, executorReason?, executorCallsTotal }`
-- `sessionMetrics` → `{ executorCalls, override }`
+## 6. 安装
 
-## 6. 配置项（settings namespace `value-router`，共 5 个字段）
-
-```
-enabled                     总开关，默认 true
-scope                       'preset'（默认）| 'global'
-excludePresets              仅 scope=global 时生效的排除清单
-strategy                    'saver' | 'balanced'（默认）| 'powerful'
-executor                    { provider, model, reasoningEffort }
-```
-
-`executor` 的校验规则：**半配置（只填 provider 或只填 model）会被设置校验拒绝**；**两个都留空是合法状态**——此时子代理通道自动关闭（决策原因 `executor-incomplete`），插件照常加载（对应 `test/config.test.ts` 的默认配置回归项）。
-
-## 7. 已知行为与边界
-
-- **只有 `origin === 'subagent'` 的会话会被改写**：主会话（用户所选模型）永不被接管，这是核心回归项（`test/routing.test.ts`）。
-- **子代理的会话覆写走父会话**：气泡挂在主会话上，子代理会话没有气泡，因此按「自身覆写 → 父会话覆写（`header.parentSession`）→ 全局配置」解析。
-- **同模型 no-op**：若目标模型与原请求模型相同，不改写、不计一次 executor 调用、保留原 `reasoningEffort`。
-- **reasoningEffort 不继承**：改写时剥掉继承的 `reasoningEffort`，只使用 executor 自己配置的档位，避免把主模型的 effort 强加给 executor 导致 `UNSUPPORTED_REASONING_EFFORT`。
-- **计量口径**：只有 executor 路由调用次数是宿主实值（`executorCallsTotal` / 会话级 `executorCalls`）；**没有任何 token 估算口径**。
-- **遥测**：仅当 Desktop 指标桥开启（环境变量 `DSH_DESKTOP_PRODUCT_METRICS_BRIDGE=1`）时向 stdout 写 `DSH_VALUE_ROUTER_METRIC {"event":"value_router_route",...}`；只含固定枚举与白名单化的模型 id，不含会话 id / 提示词 / 凭据。
-
-## 8. 退役记录
-
-- **2026-09-22：删除桥接通道**。原因：使用频率低、维护面大——12 道决策门控、脱敏、限额、压缩回注、字符估算记账，整套链路只为把无工具的单轮问答经本地 Chat2API 桥外发给网页端模型。同时删除了 `bridge_ask` / `bridge_batch` / `bridge_batch_result` 三个工具及对应的全部配置面（门控参数、桥设置区、桥徽章指标、批次队列、桥健康探测、压缩回注、字符估算记账等），插件自此**不注册任何工具**。
-- **历史配置残留是无害的**：`settings.yaml` 里可能残留历史 `value-router.bridge` 块——schemastery 的 object 解析对未知键不报错，**无需手工清理**，也不影响插件加载。旧的桥 API Key 环境变量（`VALUE_ROUTER_BRIDGE_API_KEY` / `DEEPSEEK_WEB_BRIDGE_API_KEY`）已不再读取。
-- **回滚方式**：本插件是 git 仓库，删桥那一版的前一个提交是 `f0c9cbd`（`git checkout f0c9cbd` 即可回到删除前的状态）。
-
-## 9. 开发
+最低宿主：**DSH 0.1.7-rc.2**（peer 范围已收窄，更早的宿主会拒绝安装或静默禁用该插件行）。
 
 ```bash
-pnpm install
-pnpm typecheck     # tsc --noEmit -p tsconfig.json（宿主+测试） && tsc --noEmit -p tsconfig.client.json（浏览器）
-pnpm test          # vitest run
-pnpm test:node     # 同一批测试用 Node 自带 runner 跑（受限环境下无子进程）
-pnpm build         # tsdown：lib/index.js+.d.ts、lib/typert.js+.d.ts、lib/status-controller.js+.d.ts、lib/client/index.js
-```
-
-构建布局与两个来源插件一致：**tsc 只做 `--noEmit` 类型检查，`lib/` 全部由 tsdown 产出**（服务端 ESM + 声明文件，客户端自注册经典脚本）。这样避免两套工具往同一个 `lib/` 写文件、产物互相覆盖。
-
-测试统一用 `node:test` + `node:assert` 的 API 书写；`vitest.config.ts` 把 `node:test` 映射到 `test/node-test-shim.ts`，所以两种 runner 跑的是同一批文件。
-
-关键回归项：
-
-- `test/routing.test.ts`：**主会话（`origin !== 'subagent'`）在任何 scope / 任何配置下都不被改写**；
-- `test/config.test.ts`：默认配置（executor 未选）必须可加载——settings 的 `validate` 在注册命名空间时就会被调用一次，抛错会让整个插件树加载失败（实测踩过）；
-- `test/typert.test.ts`：复刻 `dsh-typert-loader` 的清单校验规则，并交叉校验客户端 descriptor 的 `typeSymbol` 与宿主逐字一致。
-
-## 10. 安装
-
-插件经 profile 的 `dsh.profile.bundles` 全局装载（与两个来源插件相同）。推荐用 `dsh plugin` 管理，它会转发 pnpm 并**按已安装状态自动同步 `bundles` 列表**：
-
-```bash
-# 本地开发用 link:（软链，改完 lib 后重启即生效）
+# 开发装载（软链，改 lib/ 后重启 dsh 即生效）
 dsh plugin --profile web add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
 ```
 
-> 用 `file:` 时 pnpm 会把包**复制**进 profile 的 node_modules，之后重建 `lib/` 不会生效（要重新 install）；开发期请用 `link:`。
+> 用 `file:` 会把包**复制**进 profile 的 node_modules，改 `lib/` 不生效。开发期只用 `link:`。
 
-迁移自旧插件时，把 `@gjs27/dsh-deepseek-web-delegate` 与 `@linxin666/dsh-value-mode` 从 bundles/dependencies 移除（`dsh plugin --profile web remove ...`），并删除 `<DSH_HOME>/.agent-presets/{deepseek-web,value-mode}`（这两个目录由旧插件同步；`value-router` 预设由本插件同步）。
+插件声明了 `dsh.bundle.patch`，装完宿主会自动把它写进 `dsh.profile.bundles`，无需手改。
 
-### 启动自检
+### 升级到 0.2.0
 
-改完插件后用**独立 profile** 做启动自检：既不被主 profile 里其它插件干扰，也不影响正在运行的主实例。
+1. 旧配置里的 `scope` / `excludePresets` **不用清理**——它们变成无害的未知键。
+   想清理可在 profile 的 `cordis.patch.yml` 里删掉 `value-router` 条目下的这两个键；
+   通过设置表单删不掉（宿主会把未知键 merge 回来）。
+2. `<DSH_HOME>/.agent-presets/value-router` 是旧版本同步过去的预设目录，
+   **插件不会自动删**（避免误删你自建的同名预设），需要你手动删除。
+3. `pool` 默认为空。**第一次升级后请务必配置至少一条线路**——否则子代理会继承主模型。
+
+## 7. 验证与回退
 
 ```bash
-dsh plugin --profile vr-check install
-dsh plugin --profile vr-check add link:D:/dsh-workspaces/dev/local-plugins/dsh-value-router
-# 再把 "@deepseek-ai/dsh-web-app" 加进 vr-check 的 dsh.profile.bundles
-dsh --profile vr-check --port 3081 --no-open
+pnpm install --config.confirmModulesPurge=false
+pnpm typecheck   # tsc ×2（host + client）
+pnpm test        # vitest，80 个用例
+pnpm build       # tsdown
 ```
 
-判据：启动日志出现 `dsh web: http://127.0.0.1:3081/?token=...`；带 token 打开首页后，启动 combo（`/plugins/??...`）里应包含 `@gjs27/dsh-value-router/client.js`。
+回退：仓库有完整 git 历史（2026-09-29 从残缺的 `.git/` 中抢救回 5 个提交）。
+`v0.1.0-local` tag 指向适配前的状态。
+
+```bash
+git checkout v0.1.0-local && pnpm install && pnpm build
+```
+
+## 8. 隐私与供应链
+
+- 插件**不读取任何 API Key**；线路从宿主已配置的 provider 中选择。
+- 遥测仅在 `DSH_DESKTOP_PRODUCT_METRICS_BRIDGE=1` 时向 stdout 写封闭枚举 + 轮转池**条数**，
+  不含会话 id、提示词、模型名或路径。
+- 安装期**不执行任何代码**（无 `postinstall` / `prepare`）。`prepublishOnly` 只在
+  `npm publish` 时触发。
+
+## 9. 退役记录
+
+- **2026-09-29（0.2.0）**：专属预设 `value-router` 整体删除；`scope` / `excludePresets`
+  字段删除；「无条件改写子代理线路」改为「显式指定即放行 + 轮转兜底」。
+- **2026-09-22（0.1.0）**：桥接通道（Chat2API 外发 + `bridge_*` 三工具 + 12 道门控 +
+  脱敏/限额/压缩回注/字符估算记账）整体删除，配置面从 30+ 字段收缩到 5 个。
+  插件只剩子代理路由这一条通道，不再持有任何 HTTP 客户端或批次队列。

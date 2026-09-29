@@ -28,6 +28,38 @@ export interface GlobalMetricsSnapshot {
   executorCalls: number
 }
 
+/**
+ * 一个子会话「本插件第一次见到它时」的线路意图快照。
+ *
+ * 为什么需要它：`agent/request` 的 `next()` 只能给出「本次请求实际会用的线路」，
+ * 官方注释明确「首次请求返回 agent options，之后返回 logged header」
+ * （dsh-agent/lib/types/runtime-types.d.ts:312-314）。插件一旦在首次请求改写过线路，
+ * 后续 step 读到的就是**插件自己写进去的值**，"主控原始意图"就丢了。
+ * 必须在改写之前把这个值拍下来。
+ */
+export interface ChildRouteIntent {
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  /** 首次观察到的 turn/step，仅用于日志与冷恢复诊断。 */
+  readonly observedAt: { readonly turn: number; readonly step: number }
+  /**
+   * 父会话线路 'provider/model'。用于判定「是否与父相同」——而这正是
+   * `ambiguousPolicy` 唯一能介入的地方。
+   */
+  readonly parentRoute: string | undefined
+  /**
+   * first-seen = 本进程内首次见到该子会话；restored = 插件中途加载/重启后第一次见到，
+   * 拿不到真实首请求（next() 此时已是 logged header），只能当近似用。
+   */
+  readonly source: 'first-seen' | 'restored'
+}
+
+/** 线路的 'provider/model' 归一化键。 */
+export function routeKey(provider: string, model: string): string {
+  return `${provider}/${model}`
+}
+
 function emptyMetrics(): SessionValueRouterMetrics {
   return { executorCalls: 0 }
 }
@@ -40,6 +72,94 @@ class ValueRouterStateManager {
    * 含环保护，避免异常 lineage 造成死循环。
    */
   private parents = new Map<string, string>()
+  /**
+   * 子会话 -> 首次观察到的线路意图。**只在首次观察时写入，永不覆盖**
+   * （覆盖等于把插件自己的改写结果当成主控的原始意图）。
+   */
+  private intents = new Map<string, ChildRouteIntent>()
+  /**
+   * 轮转序号。key 是**子会话**，值是该子会话在其父会话下的创建序号。
+   * 同一个子会话在生命周期内只会分配一次——这是防止多 step 子代理在 step 之间
+   * 跳模型的关键（跳模型会让同一段对话历史由不同模型生成，宿主会插入
+   * model-switch notice）。因此这里**不是**每次 request 递增的计数器。
+   */
+  private rotationSlots = new Map<string, number>()
+  /** 父会话 -> 已分配出去��轮转序号个数。 */
+  private rotationCounters = new Map<string, number>()
+  /** 父会话缺失（冷恢复/异常）时的进程级兜底计数器。 */
+  private orphanRotationCounter = 0
+
+  /**
+   * 取（或首次分配）该子会话的轮转序号。
+   *
+   * @param childId 子会话 id
+   * @param parentId 父会话 id；缺失时退化为进程级单调计数
+   */
+  rotationIndexOf(childId: string, parentId?: string): number {
+    const existing = this.rotationSlots.get(childId)
+    if (existing !== undefined) return existing
+    let index: number
+    if (parentId) {
+      index = this.rotationCounters.get(parentId) ?? 0
+      this.rotationCounters.set(parentId, index + 1)
+    } else {
+      index = this.orphanRotationCounter++
+    }
+    this.rotationSlots.set(childId, index)
+    return index
+  }
+
+  /** 记录子会话的线路意图；已存在则不覆盖。 */
+  rememberIntent(sessionId: string, intent: ChildRouteIntent): void {
+    if (!sessionId) return
+    if (this.intents.has(sessionId)) return
+    this.intents.set(sessionId, intent)
+  }
+
+  intentFor(sessionId: string): ChildRouteIntent | undefined {
+    return this.intents.get(sessionId)
+  }
+
+  /**
+   * 给已记录的意图补上父会话线路。已补过或本来就没有父会话时不动。
+   *
+   * 与 rememberIntent 分开是因为两者时机不同：线路在首次请求就拍下，而父会话
+   * 线路要等父会话自己的意图也被记录后才拿得到（子代理先于父会话被观察到的情况
+   * 不会发生，但插件中途加载时可能拿不到）。
+   */
+  attachParentRoute(sessionId: string, parentRoute: string | undefined): void {
+    if (parentRoute === undefined) return
+    const intent = this.intents.get(sessionId)
+    if (intent === undefined || intent.parentRoute !== undefined) return
+    this.intents.set(sessionId, { ...intent, parentRoute })
+  }
+
+  clearIntent(sessionId: string): void {
+    this.intents.delete(sessionId)
+    this.rotationSlots.delete(sessionId)
+  }
+
+  /**
+   * 清理过期的意图与轮转槽位（长跑进程里子会话会无限增长）。
+   *
+   * Map 保持插入序，所以超限时按 FIFO 淘汰最老的条目即可；不需要时间戳——
+   * `ChildRouteIntent.observedAt` 存的是 turn/step 计数，本来就不是时间。
+   *
+   * @param maxEntries 保留上限
+   * @returns 被清理的条目数
+   */
+  pruneIntents(maxEntries: number): number {
+    const overflow = this.intents.size - maxEntries
+    if (overflow <= 0) return 0
+    let removed = 0
+    for (const id of [...this.intents.keys()]) {
+      if (removed >= overflow) break
+      this.intents.delete(id)
+      this.rotationSlots.delete(id)
+      removed++
+    }
+    return removed
+  }
 
   /** 记录子会话的父会话归属；不创建会话条目，因此对非本插件会话调用也无副作用。 */
   trackChildSession(childId: string, parentSessionId: string): void {
@@ -125,6 +245,10 @@ class ValueRouterStateManager {
   resetAll(): void {
     this.sessions.clear()
     this.parents.clear()
+    this.intents.clear()
+    this.rotationSlots.clear()
+    this.rotationCounters.clear()
+    this.orphanRotationCounter = 0
     this.globalExecutorCalls = 0
   }
 }

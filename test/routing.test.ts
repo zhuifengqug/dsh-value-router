@@ -1,127 +1,227 @@
 /**
- * 路由决策回归测试（规格 §3.2 + 验收「任何情况下主会话模型不被改写」）。
+ * 路由决策回归测试（0.2.0 新判定顺序 + 验收「任何情况下主会话模型不被改写」）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { decideSubagentRoute, pickOverride, resolveCurrentPreset } from '../src/core/routing.ts'
+import {
+  decideSubagentRoute,
+  isExplicitSelection,
+  isSubagentSession,
+  pickOverride,
+  pickTargetRoute,
+  routeSkipText,
+  type RouteDecisionInput,
+} from '../src/core/routing.ts'
+import type { ChildRouteIntent } from '../src/core/state.ts'
 import type { ValueRouterConfig } from '../src/core/config.ts'
 
-const EXECUTOR = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
+const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
+const POOL = [
+  { provider: 'p1', model: 'm1', reasoningEffort: '', tier: 'cheap' as const },
+  { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong' as const },
+]
 
-function baseConfig(overrides: Partial<ValueRouterConfig> = {}): Partial<ValueRouterConfig> {
+function config(overrides: Partial<ValueRouterConfig> = {}): Partial<ValueRouterConfig> {
+  return { enabled: true, strategy: 'balanced', executor: { ...FALLBACK }, ...overrides }
+}
+
+function input(overrides: Partial<RouteDecisionInput> = {}): RouteDecisionInput {
   return {
-    enabled: true,
-    scope: 'preset',
-    strategy: 'balanced',
-    executor: { ...EXECUTOR },
+    globalConfig: config(),
+    origin: 'subagent',
+    targetAvailable: true,
+    fallbackAvailable: true,
     ...overrides,
   }
 }
 
-const SUBAGENT = { agentPreset: 'value-router', origin: 'subagent' }
+function intent(partial: Partial<ChildRouteIntent> = {}): ChildRouteIntent {
+  return {
+    provider: 'main',
+    model: 'main-model',
+    observedAt: { turn: 0, step: 0 },
+    parentRoute: 'main/main-model',
+    source: 'first-seen',
+    ...partial,
+  }
+}
 
-test('scope=preset：专属预设内的子代理被路由到 executor', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
-    executorAvailable: true,
+// —— 轮转：本次迭代的核心行为 ——
+
+test('轮转：池 2 条、序号 0/1/2 → 线路序列 A,B,A', () => {
+  const routes = [0, 1, 2].map((index) => {
+    const decision = decideSubagentRoute(input({
+      globalConfig: config({ pool: POOL }),
+      rotationIndex: index,
+    }))
+    assert.equal(decision.route, true)
+    if (!decision.route) throw new Error('unreachable')
+    return `${decision.provider}/${decision.model}`
   })
+  assert.deepEqual(routes, ['p1/m1', 'p2/m2', 'p1/m1'])
+})
+
+test('轮转：负数序号不产生负索引', () => {
+  const decision = decideSubagentRoute(input({ globalConfig: config({ pool: POOL }), rotationIndex: -1 }))
+  assert.equal(decision.route, true)
+  if (!decision.route) return
+  assert.equal(decision.provider, 'p2')
+})
+
+test('轮转：池非空时来源标记为 pool，池空时回落到兜底线路', () => {
+  const pooled = decideSubagentRoute(input({ globalConfig: config({ pool: POOL }), rotationIndex: 0 }))
+  assert.equal(pooled.route, true)
+  if (pooled.route) assert.equal(pooled.source, 'pool')
+
+  const fallback = decideSubagentRoute(input({ globalConfig: config() }))
+  assert.equal(fallback.route, true)
+  if (fallback.route) assert.equal(fallback.source, 'fallback')
+})
+
+test('pickTargetRoute：池为空时用兜底线路', () => {
+  assert.deepEqual(
+    pickTargetRoute([], FALLBACK, 3),
+    { route: FALLBACK, source: 'fallback' },
+  )
+  assert.deepEqual(
+    pickTargetRoute(POOL, FALLBACK, 3),
+    { route: POOL[1]!, source: 'pool' },
+  )
+})
+
+// —— B+1：尊重主控显式指定 ——
+
+test('B+1：主控显式指定了与父不同的线路 → 放行，不改写', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }),
+    rotationIndex: 0,
+    intent: intent({ provider: 'other', model: 'other-model', parentRoute: 'main/main-model' }),
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'explicit-route' })
+})
+
+test('B+1：显式指定了与父相同的线路 → 歧义，rotate(默认) 继续轮转 / respect 放行', () => {
+  const same = intent({ provider: 'main', model: 'main-model', parentRoute: 'main/main-model' })
+  assert.equal(isExplicitSelection(same, 'rotate'), false)
+  assert.equal(isExplicitSelection(same, 'respect'), true)
+
+  const rotate = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }), rotationIndex: 0, intent: same,
+  }))
+  assert.equal(rotate.route, true)
+
+  const respect = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL, ambiguousPolicy: 'respect' }), rotationIndex: 0, intent: same,
+  }))
+  assert.deepEqual(respect, { route: false, reason: 'explicit-route' })
+})
+
+test('B+1：没有意图快照时视为未指定，走轮转', () => {
+  assert.equal(isExplicitSelection(undefined, 'rotate'), false)
+  assert.equal(isExplicitSelection(undefined, 'respect'), false)
+})
+
+// —— 不可绕过的不变量 ——
+
+test('主会话（origin 非 subagent）永不被改写——最关键回归项，任何配置都不例外', () => {
+  // 注意 origin 必须显式覆盖：input() 的默认值是 'subagent'，
+  // 少传字段会让「origin 缺失」这一档悄悄变成子代理而测不到。
+  for (const origin of [undefined, 'user', 'command', 'teammate'] as const) {
+    for (const cfg of [config(), config({ pool: POOL }), config({ ambiguousPolicy: 'respect' })]) {
+      const decision = decideSubagentRoute(input({
+        globalConfig: cfg,
+        origin,
+        rotationIndex: 0,
+      }))
+      assert.deepEqual(decision, { route: false, reason: 'not-subagent' }, `origin=${String(origin)} 不应被改写`)
+    }
+  }
+})
+
+test('isSubagentSession：只有 subagent 为真（Agent Team 队友也是 subagent child）', () => {
+  assert.equal(isSubagentSession({ origin: 'subagent' }), true)
+  assert.equal(isSubagentSession({ origin: 'user' }), false)
+  assert.equal(isSubagentSession({}), false)
+  assert.equal(isSubagentSession(undefined), false)
+  assert.equal(isSubagentSession(null), false)
+})
+
+// —— 开关 / 目标缺失 ——
+
+test('总开关关闭时不路由', () => {
+  const decision = decideSubagentRoute(input({ globalConfig: config({ enabled: false }) }))
+  assert.deepEqual(decision, { route: false, reason: 'disabled' })
+})
+
+test('池为空且兜底线路未配置 → 无处可派', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: { enabled: true, strategy: 'balanced' },
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'no-target' })
+})
+
+test('半配置兜底线路被 sanitize 成未配置 → 无处可派（不抛错）', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ executor: { provider: 'deepseek', model: '' } }),
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'no-target' })
+})
+
+test('池中目标 provider 不可用 → 降级到兜底线路', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }),
+    rotationIndex: 0,
+    targetAvailable: false,
+    fallbackAvailable: true,
+  }))
   assert.equal(decision.route, true)
   if (!decision.route) return
   assert.equal(decision.provider, 'deepseek')
   assert.equal(decision.model, 'deepseek-chat')
-  assert.equal(decision.overrideSource, 'global')
+  assert.equal(decision.source, 'fallback')
 })
 
-test('scope=preset：其它预设的会话不被路由', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    agentPreset: 'standard',
-    origin: 'subagent',
-    executorAvailable: true,
-  })
-  assert.deepEqual(decision, { route: false, reason: 'scope' })
+test('池中目标不可用且兜底也不可用 → 安全放行', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }),
+    rotationIndex: 0,
+    targetAvailable: false,
+    fallbackAvailable: false,
+  }))
+  assert.equal(decision.route, false)
 })
 
-test('scope=global：未选择预设的会话也生效', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig({ scope: 'global' }),
-    origin: 'subagent',
-    executorAvailable: true,
-  })
-  assert.equal(decision.route, true)
-})
-
-test('scope=global：excludePresets 命中的预设不被路由', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig({ scope: 'global', excludePresets: ['liangshen'] }),
-    agentPreset: 'liangshen',
-    origin: 'subagent',
-    executorAvailable: true,
-  })
-  assert.deepEqual(decision, { route: false, reason: 'scope' })
-})
-
-test('主会话（origin 非 subagent）永不被改写——最关键回归项', () => {
-  for (const origin of [undefined, 'user', 'command'] as const) {
-    const decision = decideSubagentRoute({
-      globalConfig: baseConfig({ scope: 'global' }),
-      agentPreset: 'value-router',
-      ...(origin !== undefined ? { origin } : {}),
-      executorAvailable: true,
-    })
-    assert.deepEqual(decision, { route: false, reason: 'not-subagent' })
-  }
-})
-
-test('总开关关闭时不路由', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig({ enabled: false }),
-    ...SUBAGENT,
-    executorAvailable: true,
-  })
-  assert.deepEqual(decision, { route: false, reason: 'disabled' })
-})
-
-test('executor 未配置完整时不路由（此处只关子代理通道）', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig({ executor: { provider: 'deepseek', model: '' } }),
-    ...SUBAGENT,
-    executorAvailable: true,
-  })
-  assert.deepEqual(decision, { route: false, reason: 'executor-incomplete' })
-})
-
-test('executor provider 不可用时安全降级为普通路由', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
-    executorAvailable: false,
-  })
+test('池为空、兜底线路 provider 不可用 → 安全放行', () => {
+  const decision = decideSubagentRoute(input({ targetAvailable: false, fallbackAvailable: false }))
   assert.deepEqual(decision, { route: false, reason: 'executor-unavailable' })
 })
 
+// —— no-op ——
+
+test('目标线路与本次请求本来会用的线路一致 → no-op，不改写', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }),
+    rotationIndex: 0,
+    resolvedRoute: { provider: 'p1', model: 'm1' },
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'noop' })
+})
+
+// —— 会话覆写 ——
+
 test('会话覆写可关闭本会话路由', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
-    sessionOverride: { enabled: false },
-    executorAvailable: true,
-  })
+  const decision = decideSubagentRoute(input({ sessionOverride: { enabled: false } }))
   assert.deepEqual(decision, { route: false, reason: 'disabled' })
 })
 
-test('会话覆写可换 executor，并带上 reasoningEffort', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
+test('会话覆写可换兜底线路，并带上 reasoningEffort', () => {
+  const decision = decideSubagentRoute(input({
     sessionOverride: {
       strategy: 'saver',
       executor: { provider: 'other', model: 'cheap-model', reasoningEffort: 'low' },
     },
-    executorAvailable: true,
-  })
+  }))
   assert.equal(decision.route, true)
   if (!decision.route) return
   assert.equal(decision.provider, 'other')
@@ -129,19 +229,24 @@ test('会话覆写可换 executor，并带上 reasoningEffort', () => {
   assert.equal(decision.reasoningEffort, 'low')
   assert.equal(decision.overrideSource, 'session')
   assert.equal(decision.effective.strategy, 'saver')
-  // 覆写后的生效配置仍是完整的 5 字段形状
-  assert.equal(decision.effective.scope, 'preset')
-  assert.deepEqual(decision.effective.excludePresets, [])
   assert.deepEqual(decision.effective.executor, { provider: 'other', model: 'cheap-model', reasoningEffort: 'low' })
 })
 
+test('会话覆写不覆盖 pool：轮转序列不会因气泡改动而错位', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL }),
+    sessionOverride: { executor: { provider: 'other', model: 'x' } },
+    rotationIndex: 0,
+  }))
+  assert.equal(decision.route, true)
+  if (!decision.route) return
+  assert.equal(decision.source, 'pool', '池仍然生效，覆写只影响兜底线路')
+})
+
 test('子代理没有自身覆写时使用父会话覆写', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
+  const decision = decideSubagentRoute(input({
     parentOverride: { executor: { provider: 'parent-provider', model: 'parent-model' } },
-    executorAvailable: true,
-  })
+  }))
   assert.equal(decision.route, true)
   if (!decision.route) return
   assert.equal(decision.provider, 'parent-provider')
@@ -149,13 +254,10 @@ test('子代理没有自身覆写时使用父会话覆写', () => {
 })
 
 test('自身覆写优先于父会话覆写', () => {
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    ...SUBAGENT,
+  const decision = decideSubagentRoute(input({
     sessionOverride: { executor: { provider: 'own', model: 'own-model' } },
     parentOverride: { executor: { provider: 'parent-provider', model: 'parent-model' } },
-    executorAvailable: true,
-  })
+  }))
   assert.equal(decision.route, true)
   if (!decision.route) return
   assert.equal(decision.provider, 'own')
@@ -168,54 +270,11 @@ test('pickOverride：无覆写时回落到全局配置', () => {
   assert.equal(pickOverride({ enabled: true }, { enabled: false }).source, 'session')
 })
 
-// —— 会话当前预设的解析（实测事故回归：header 是创建时的值，切换预设不改它）——
-
-test('resolveCurrentPreset：实时组合优先于会话投影优先于创建 header', () => {
-  assert.equal(
-    resolveCurrentPreset({ composed: 'value-router', projection: 'standard', header: 'standard' }),
-    'value-router',
-  )
-  assert.equal(
-    resolveCurrentPreset({ composed: undefined, projection: 'value-router', header: 'standard' }),
-    'value-router',
-  )
-  assert.equal(
-    resolveCurrentPreset({ composed: null, projection: null, header: 'value-router' }),
-    'value-router',
-  )
+test('routeSkipText 覆盖全部跳过原因（漏一个会是静默的 undefined）', () => {
+  for (const reason of [
+    'disabled', 'not-subagent', 'no-target', 'explicit-route',
+    'executor-incomplete', 'executor-unavailable', 'noop',
+  ] as const) {
+    assert.ok(routeSkipText(reason).length > 0, `${reason} 缺少人读文案`)
+  }
 })
-
-test('resolveCurrentPreset：三者都缺失/为空时返回 undefined', () => {
-  assert.equal(resolveCurrentPreset({}), undefined)
-  assert.equal(resolveCurrentPreset({ composed: undefined, projection: null, header: '' }), undefined)
-})
-
-test('回归：会话以 standard 创建、随即切成 value-router，scope=preset 必须仍然生效', () => {
-  // 事故现场：header.agentPreset === 'standard'（创建时的值，不可变），
-  // 而实时组合/投影都已经是 value-router。按 header 判定会一直「不在生效范围」，
-  // 表现为「选了价值路由预设却一次都不派子代理」。
-  const resolved = resolveCurrentPreset({
-    composed: 'value-router',
-    projection: 'value-router',
-    header: 'standard',
-  })
-  assert.equal(resolved, 'value-router')
-
-  const decision = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    agentPreset: resolved,
-    origin: 'subagent',
-    executorAvailable: true,
-  })
-  assert.equal(decision.route, true, '按当前预设判定应路由')
-
-  // 反证：如果仍然拿创建 header，就会被 scope 门静默跳过
-  const wrong = decideSubagentRoute({
-    globalConfig: baseConfig(),
-    agentPreset: 'standard',
-    origin: 'subagent',
-    executorAvailable: true,
-  })
-  assert.deepEqual(wrong, { route: false, reason: 'scope' })
-})
-

@@ -1,20 +1,30 @@
 /**
- * 「价值路由」完整设置卡（settings.plugin.item 的展开体）。
+ * 「价值路由」设置卡（settings.plugin.item）。
  *
- * 一个区：enabled / scope / excludePresets / strategy / executor picker /
- * executor 健康提示。executor 健康与累计调用次数走宿主 Remote。
+ * 0.2.0 的版面变化：
+ * - 删掉「生效范围 / 排除预设」——专属预设已摘除，插件对全部预设生效；
+ * - 新增**轮转线路池编辑器**：最多 4 条线路，每条带 cheap/mid/strong 档位标注，
+ *   并给出「池 2 条 + 3 个子会话 → 线路序列 A,B,A」的实时预览；
+ * - `executor` 改称**兜底线路**：只在池为空、或池中目标 provider 不可用时使用。
  */
 
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useMemo, useState } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
   ModelRouteSelection,
+  PoolLine,
   ValueRouterConfig,
-  ValueRouterScope,
   ValueRouterStrategy,
+  ValueRouterTier,
 } from '../core/config.ts'
-import { isCompleteModelRoute, resolveEffectiveConfig, strategyLabel } from '../core/config.ts'
+import {
+  POOL_MAX_LINES,
+  isCompleteModelRoute,
+  resolveEffectiveConfig,
+  strategyLabel,
+  tierLabel,
+} from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
 import { useValueRouterConfig } from './useValueRouterConfig.ts'
 import { useLiveStatus } from './use-live-status.ts'
@@ -26,14 +36,21 @@ import { reportValueRouterTelemetry } from './telemetry.ts'
 
 export interface ValueRouterSettingsCardProps {
   config: ValueRouterConfig
-  settingsScope?: SettingsScope<ValueRouterConfig>
+  configForm?: ConfigForm<ValueRouterConfig>
   onChange: (patch: Partial<ValueRouterConfig>) => Promise<void> | void
   fetchModels?: () => Promise<ValueRouterModelCatalog>
-  /** 宿主 client context：传入后读取 executor 健康 / 累计统计。 */
+  /** 宿主 client context：传入后读取兜底线路健康 / 累计统计。 */
   clientCtx?: Context
 }
 
 const STRATEGIES: readonly ValueRouterStrategy[] = ['saver', 'balanced', 'powerful']
+const TIERS: readonly ValueRouterTier[] = ['cheap', 'mid', 'strong']
+
+const STRATEGY_DESC: Record<ValueRouterStrategy, string> = {
+  saver: '少派发，能自己做的就自己做，控制子代理调用量',
+  balanced: '按任务复杂度派发，重要结果由主模型复核',
+  powerful: '积极并行并要求返回证据，优先交付质量',
+}
 
 function errorText(reason: unknown, fallback: string): string {
   if (reason instanceof Error && reason.message.trim()) return reason.message.trim()
@@ -66,49 +83,36 @@ const SelectField: React.FC<SelectFieldProps> = ({ label, value, options, onComm
   </div>
 )
 
+/** 把会话内即将出现的线路顺序摊开给用户看——轮转是可预测的，值得明示。 */
+function rotationPreview(pool: readonly PoolLine[], samples = 4): string {
+  if (pool.length === 0) return ''
+  return Array.from({ length: samples }, (_, index) => {
+    const line = pool[index % pool.length]!
+    return `${index + 1}→${line.model}`
+  }).join('  ')
+}
+
 export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = ({
   config,
-  settingsScope,
+  configForm,
   onChange,
   fetchModels,
   clientCtx,
 }) => {
   const dock = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('desktop-dock-setting')
-  const liveConfig = useValueRouterConfig(settingsScope, config)
+  const liveConfig = useValueRouterConfig(configForm, config)
   const resolved = resolveEffectiveConfig(liveConfig)
-  const configured = isCompleteModelRoute(resolved.executor)
-  const [pickingExecutor, setPickingExecutor] = useState(false)
+  const pool = resolved.pool
+  const fallbackComplete = isCompleteModelRoute(resolved.executor)
+  const usable = pool.length > 0 || fallbackComplete
+  const [pickingFallback, setPickingFallback] = useState(false)
+  const [pickingFor, setPickingFor] = useState<number | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
-  const [executorEfforts, setExecutorEfforts] = useState<readonly { readonly id: string; readonly name: string }[]>([])
-  const [excludeText, setExcludeText] = useState(resolved.excludePresets.join(', '))
   const liveStatus = useLiveStatus(clientCtx, true)
 
-  const executorComplete = isCompleteModelRoute(resolved.executor)
-  const executorProvider = resolved.executor?.provider
-  const executorModel = resolved.executor?.model
-  const excludeKey = resolved.excludePresets.join(',')
-
-  useEffect(() => { setExcludeText(excludeKey.split(',').filter(Boolean).join(', ')) }, [excludeKey])
-
-  // 推理档位来自运行时目录，因此选择器只能提供 adapter 真正接受的档位。
-  useEffect(() => {
-    if (!fetchModels || !executorComplete) {
-      setExecutorEfforts([])
-      return
-    }
-    let active = true
-    void Promise.resolve().then(() => fetchModels()).then((catalog) => {
-      if (!active) return
-      const model = catalog.groups
-        .find((group) => group.id === executorProvider)
-        ?.models.find((entry) => entry.id === executorModel)
-      setExecutorEfforts(model?.reasoning?.efforts ?? [])
-    }).catch(() => { if (active) setExecutorEfforts([]) })
-    return () => { active = false }
-  }, [executorComplete, executorModel, executorProvider, fetchModels])
+  const preview = useMemo(() => rotationPreview(pool), [pool])
 
   // —— 写入 ——
-
   const persist = useCallback((patch: Partial<ValueRouterConfig>): void => {
     setSaveError(null)
     void Promise.resolve()
@@ -118,7 +122,7 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
           reportValueRouterTelemetry({ kind: 'state', state: patch.enabled ? 'enabled' : 'disabled', source: 'settings' })
         }
         if (patch.strategy !== undefined) reportValueRouterTelemetry({ kind: 'strategy', strategy: patch.strategy })
-        if (patch.scope !== undefined) reportValueRouterTelemetry({ kind: 'scope', scope: patch.scope })
+        if (patch.pool !== undefined) reportValueRouterTelemetry({ kind: 'pool', size: patch.pool.length })
       })
       .catch((reason) => {
         setSaveError(errorText(reason, '配置写入失败，请重试。'))
@@ -127,18 +131,36 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
   }, [onChange])
 
   const handleToggleEnable = (): void => {
-    if (!configured && !resolved.enabled) return
+    if (!usable && !resolved.enabled) return
     persist({ enabled: !resolved.enabled })
   }
 
-  const handleModelSelected = (selection: ModelRouteSelection): void => {
-    persist({ executor: selection })
+  const commitPool = (next: PoolLine[]): void => persist({ pool: next })
+
+  const handleAddLine = (): void => {
+    if (pool.length >= POOL_MAX_LINES) return
+    commitPool([...pool, { provider: '', model: '', reasoningEffort: '', tier: 'mid' }])
   }
 
-  const handleExcludeCommit = (): void => {
-    const next = excludeText.split(',').map((item) => item.trim()).filter(Boolean)
-    if (next.join(',') === excludeKey) return
-    persist({ excludePresets: next })
+  const handleRemoveLine = (index: number): void => {
+    commitPool(pool.filter((_, i) => i !== index))
+  }
+
+  const handleMoveLine = (index: number, delta: number): void => {
+    const target = index + delta
+    if (target < 0 || target >= pool.length) return
+    const next = [...pool]
+    const [moved] = next.splice(index, 1)
+    next.splice(target, 0, moved!)
+    commitPool(next)
+  }
+
+  const patchLine = (index: number, patch: Partial<PoolLine>): void => {
+    commitPool(pool.map((line, i) => (i === index ? { ...line, ...patch } : line)))
+  }
+
+  const handleFallbackSelected = (selection: ModelRouteSelection): void => {
+    persist({ executor: selection })
   }
 
   return (
@@ -147,12 +169,12 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
         <div className={`${styles.titleArea} ${layout.titleArea}`}>
           <div className={`${styles.titleRow} ${layout.titleRow}`}>
             <span className={`${styles.title} ${layout.title}`}>价值路由</span>
-            <span className={`${styles.badge} ${!configured ? styles.badgeDegraded : resolved.enabled ? styles.badgeActive : styles.badgeInactive}`}>
-              {!configured ? '配置不完整' : resolved.enabled ? '已开启' : '已关闭'}
+            <span className={`${styles.badge} ${!usable ? styles.badgeDegraded : resolved.enabled ? styles.badgeActive : styles.badgeInactive}`}>
+              {!usable ? '配置不完整' : resolved.enabled ? '已开启' : '已关闭'}
             </span>
           </div>
           <span className={styles.desc}>
-            主模型永不被接管：带工具的子任务下沉给 executor 子代理执行，派发的积极程度由运行策略决定。
+            主模型永不被接管。主控没显式指定线路时，子代理按轮转池依次分配——并行的子代理会落在不同模型上，既补上思考盲区，也避开单条线路的并发瓶颈。对所有预设生效。
           </span>
         </div>
         <div className={`${styles.switchArea} ${layout.switchArea}`}>
@@ -162,7 +184,7 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
             role="switch"
             aria-checked={resolved.enabled}
             aria-label="价值路由开关"
-            aria-disabled={!configured && !resolved.enabled}
+            aria-disabled={!usable && !resolved.enabled}
             tabIndex={0}
             onClick={handleToggleEnable}
             onKeyDown={(event) => {
@@ -176,97 +198,128 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
       {saveError && <div className={a11y.error} role="alert">{saveError}</div>}
 
-      {dock && !configured && (
+      {dock && !usable && (
         <div className={dockStyles.setupHint}>
-          <span>先选择 executor 子代理执行模型，再开启路由。</span>
-          <button type="button" className={`${styles.button} ${styles.buttonPrimary}`} onClick={() => setPickingExecutor(true)}>选择执行模型</button>
+          <span>先添加至少一条轮转线路（或配置兜底线路），再开启路由。</span>
+          <button type="button" className={`${styles.button} ${styles.buttonPrimary}`} onClick={handleAddLine}>添加线路</button>
         </div>
       )}
 
-      {/* —— 路由区 —— */}
+      {/* —— 轮转线路池 —— */}
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>路由</div>
+        <div className={styles.sectionTitle}>轮转线路池</div>
+
+        {pool.length === 0 ? (
+          <div className={styles.fieldHint}>尚未添加线路。没有池时子代理会继承主模型——那是最贵的一条。</div>
+        ) : (
+          pool.map((line, index) => {
+            const complete = isCompleteModelRoute(line)
+            return (
+              <div key={index} className={styles.fieldRow} data-value-router-pool-line={String(index)}>
+                <span className={styles.fieldLabel}>
+                  线路 {index + 1}
+                  <span className={styles.fieldHint}>{line.provider ? `${line.provider} / ` : ''}{line.model || '未选择模型'}</span>
+                </span>
+                <div className={styles.strategyGroup}>
+                  <button
+                    type="button"
+                    className={styles.button}
+                    onClick={() => { setPickingFor(index); setPickingFallback(false) }}
+                  >
+                    {complete ? '更换模型' : '选择模型'}
+                  </button>
+                  <select
+                    className={styles.selectInput}
+                    value={line.tier}
+                    aria-label={`线路 ${index + 1} 档位`}
+                    onChange={(event) => patchLine(index, { tier: event.target.value as ValueRouterTier })}
+                  >
+                    {TIERS.map((tier) => (
+                      <option key={tier} value={tier}>{tierLabel(tier)}档</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className={styles.button}
+                    aria-label={`上移线路 ${index + 1}`}
+                    disabled={index === 0}
+                    onClick={() => handleMoveLine(index, -1)}
+                  >↑</button>
+                  <button
+                    type="button"
+                    className={styles.button}
+                    aria-label={`下移线路 ${index + 1}`}
+                    disabled={index === pool.length - 1}
+                    onClick={() => handleMoveLine(index, 1)}
+                  >↓</button>
+                  <button
+                    type="button"
+                    className={styles.button}
+                    aria-label={`删除线路 ${index + 1}`}
+                    onClick={() => handleRemoveLine(index)}
+                  >删除</button>
+                </div>
+              </div>
+            )
+          })
+        )}
 
         <div className={styles.fieldRow}>
-          <span className={styles.fieldLabel}>生效范围</span>
-        </div>
-        <div className={styles.strategyGroup}>
-          {(['preset', 'global'] as ValueRouterScope[]).map((scope) => (
-            <button
-              type="button"
-              key={scope}
-              aria-pressed={resolved.scope === scope}
-              className={`${styles.strategyItem} ${resolved.scope === scope ? styles.strategyItemSelected : ''}`}
-              onClick={() => persist({ scope })}
-            >
-              <span className={styles.strategyTitle}>{scope === 'preset' ? '仅专属预设' : '所有预设'}</span>
-              <span className={styles.strategyDesc}>
-                {scope === 'preset' ? '只在「价值路由」预设的会话内生效' : '在所有预设中生效，可用排除清单跳过'}
-              </span>
-            </button>
-          ))}
+          <button
+            type="button"
+            className={`${styles.button} ${styles.buttonPrimary}`}
+            disabled={pool.length >= POOL_MAX_LINES}
+            onClick={handleAddLine}
+          >
+            {pool.length >= POOL_MAX_LINES ? `已达上限（${POOL_MAX_LINES} 条）` : '添加线路'}
+          </button>
+          <span className={styles.fieldHint}>
+            最多 {POOL_MAX_LINES} 条；多样性收益在 3-4 条饱和。档位只影响给主控的提示文案与这里的排序，不参与路由判据。
+          </span>
         </div>
 
-        {resolved.scope === 'global' && (
-          <div className={styles.fieldRow}>
-            <span className={styles.fieldLabel}>
-              排除预设
-              <span className={styles.fieldHint}>逗号分隔的预设 id</span>
-            </span>
-            <input
-              className={styles.textInput}
-              type="text"
-              value={excludeText}
-              placeholder="例如：default, writer"
-              aria-label="排除预设"
-              spellCheck={false}
-              onChange={(event) => setExcludeText(event.target.value)}
-              onBlur={handleExcludeCommit}
-              onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); handleExcludeCommit() } }}
-            />
+        {preview && (
+          <div className={styles.fieldHint} role="status">
+            轮转顺序（前 4 个子代理）：{preview}
           </div>
         )}
+      </div>
+
+      {/* —— 兜底线路 —— */}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>兜底线路</div>
 
         <div className={`${styles.modelRow} ${layout.modelRow}`}>
           <div className={`${styles.modelInfo} ${layout.modelInfo}`}>
-            <div className={styles.modelRole}>executor 子代理执行模型</div>
+            <div className={styles.modelRole}>兜底线路</div>
             <div className={`${styles.modelValue} ${layout.modelValue}`}>
-              {isCompleteModelRoute(resolved.executor) ? `${resolved.executor.provider} / ${resolved.executor.model}` : '未配置'}
+              {fallbackComplete ? `${resolved.executor.provider} / ${resolved.executor.model}` : '未配置'}
             </div>
             <div className={`${styles.modelDesc} ${layout.modelDesc}`}>
-              只执行主模型派发的单项任务；模型直接从已配置供应商中选择，无需重新填写 API Key。
+              只在轮转池为空、或池中目标线路的 provider 不可用时才用。宿主本身不提供任何默认线路——没有它，子代理会直接继承主模型。
             </div>
           </div>
           <button
             type="button"
             className={`${styles.button} ${layout.modelAction} ${layout.interactiveButton}`}
-            onClick={() => setPickingExecutor(true)}
+            onClick={() => { setPickingFallback(true); setPickingFor(null) }}
           >
-            {isCompleteModelRoute(resolved.executor) ? '更换' : '选择模型'}
+            {fallbackComplete ? '更换' : '选择模型'}
           </button>
         </div>
 
         {liveStatus && (
           <div className={styles.fieldHint} role="status">
-            executor 状态：{executorStatusText(liveStatus.executorStatus)}
+            兜底线路状态：{executorStatusText(liveStatus.executorStatus)}
             {liveStatus.executorReason ? ` · ${liveStatus.executorReason}` : ''}
-            {' · '}累计调用 {liveStatus.executorCallsTotal} 次
+            {' · '}累计改写 {liveStatus.executorCallsTotal} 次
           </div>
         )}
+      </div>
 
-        {executorComplete && executorEfforts.length > 0 && (
-          <SelectField
-            label="executor 推理强度"
-            value={resolved.executor.reasoningEffort ?? ''}
-            options={[
-              { value: '', label: '跟随模型默认' },
-              ...executorEfforts.map((effort) => ({ value: effort.id, label: effort.name || effort.id })),
-            ]}
-            onCommit={(value) => persist({ executor: { ...resolved.executor, reasoningEffort: value } })}
-          />
-        )}
-
-        <div className={styles.fieldRow}><span className={styles.fieldLabel}>运行策略</span></div>
+      {/* —— 派发倾向 —— */}
+      <div className={styles.section}>
+        <div className={styles.sectionTitle}>派发倾向</div>
         <div className={styles.strategyGroup}>
           {STRATEGIES.map((strategy) => (
             <button
@@ -277,21 +330,34 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
               onClick={() => persist({ strategy })}
             >
               <span className={styles.strategyTitle}>{strategyLabel(strategy)}</span>
-              <span className={styles.strategyDesc}>
-                {strategy === 'saver' ? '少派发，控制子代理调用量' : strategy === 'powerful' ? '积极并行并要求证据，优先交付质量' : '按任务复杂度派发，重要结果由主模型复核'}
-              </span>
+              <span className={styles.strategyDesc}>{STRATEGY_DESC[strategy]}</span>
             </button>
           ))}
         </div>
+        <div className={styles.fieldHint}>
+          档位只改写给主控的提示词：让它更激进或更克制地派发子代理，不改变实际线路。
+        </div>
       </div>
 
-      {pickingExecutor && (
+      {(pickingFallback || pickingFor !== null) && (
         <ModelPicker
-          title="选择 executor 子代理执行模型"
-          current={resolved.executor}
+          title={pickingFor !== null ? `选择线路 ${pickingFor + 1} 的模型` : '选择兜底线路'}
+          current={pickingFor !== null ? pool[pickingFor] : resolved.executor}
           selectHighestEffort
-          onSelect={handleModelSelected}
-          onClose={() => setPickingExecutor(false)}
+          onSelect={(selection) => {
+            if (pickingFor !== null) {
+              patchLine(pickingFor, {
+                provider: selection.provider ?? '',
+                model: selection.model ?? '',
+                reasoningEffort: selection.reasoningEffort ?? '',
+              })
+              setPickingFor(null)
+            } else {
+              handleFallbackSelected(selection)
+              setPickingFallback(false)
+            }
+          }}
+          onClose={() => { setPickingFallback(false); setPickingFor(null) }}
           fetchModels={fetchModels}
         />
       )}

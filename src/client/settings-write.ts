@@ -1,18 +1,21 @@
 /**
  * 设置写入器：写后读回校验。
  *
- * SettingsScope 在「被拒绝」和「被接受」两种情况下都会 resolve，因此在关闭引导
- * 或上报成功遥测之前必须回读宿主结果。补丁串行化，避免本地连续编辑互相掩盖
- * 中间态的回读结果。
+ * ConfigForm.set() 在「被拒绝」和「被接受」两种情况下都会 resolve（返回布尔值），
+ * 因此在关闭引导或上报成功遥测之前必须回读宿主结果。补丁串行化，避免本地连续编辑
+ * 互相掩盖中间态的回读结果。
+ *
+ * 2026-09-29 适配 DSH 0.1.7-rc.2：宿主把 `SettingsScope` 更名为 `ConfigForm`，
+ * 且 `set()` 的返回类型从 `Promise<void>` 变为 `Promise<boolean>`（true = 宿主接受）。
+ * 这里顺势用上这个布尔值：宿主明确拒绝时不必再多回读一次。
  */
 
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ValueRouterConfig } from '../core/config.ts'
 import type { ValueRouterLocaleKey } from './locales.ts'
 
-export interface ValueRouterWritableSettingsScope extends SettingsScope<ValueRouterConfig> {
-  set(field: string, value: unknown): Promise<void>
-}
+/** 0.1.7-rc.2 起 ConfigForm 本身即可写，无需再包一层可写接口。 */
+export type ValueRouterWritableSettingsScope = ConfigForm<ValueRouterConfig>
 
 /** JSON 传输会省略值为 undefined 的键，因此比较要按同一口径。 */
 function sameSetting(actual: unknown, expected: unknown): boolean {
@@ -30,7 +33,7 @@ function sameSetting(actual: unknown, expected: unknown): boolean {
 }
 
 export function createValueRouterSettingsWriter(
-  scope: ValueRouterWritableSettingsScope,
+  form: ValueRouterWritableSettingsScope,
   t: (key: ValueRouterLocaleKey) => string,
 ): (patch: Partial<ValueRouterConfig>) => Promise<void> {
   let tail: Promise<void> = Promise.resolve()
@@ -39,13 +42,13 @@ export function createValueRouterSettingsWriter(
     const task = tail.then(async () => {
       for (const [key, value] of entries) {
         if (value === undefined) continue
-        const before = scope.getSnapshot()
+        const before = form.getSnapshot()
         if (before.status !== 'ready' || !before.writable) throw new Error(t('settingsNotWritable'))
-        await scope.set(key, value)
-        const accepted = scope.getSnapshot()
+        const acceptedByHost = await form.set(key, value)
+        const accepted = form.getSnapshot()
         const user = accepted.user
         // 继承值恰好相等并不能证明这次显式覆写被保存：必须由 user 原始层确认该字段。
-        if (accepted.status !== 'ready' || typeof user !== 'object' || user === null
+        if (!acceptedByHost || accepted.status !== 'ready' || typeof user !== 'object' || user === null
           || !Object.hasOwn(user, key) || !sameSetting((user as Record<string, unknown>)[key], value)) {
           throw new Error(t('settingsSaveFailed'))
         }
@@ -57,9 +60,9 @@ export function createValueRouterSettingsWriter(
 }
 
 /** 读取宿主 user 原始层里的某个对象字段（写入前合并用，避免覆盖未知键）。 */
-export function readUserLayer(scope: SettingsScope<ValueRouterConfig>, field: string): Record<string, unknown> | undefined {
+export function readUserLayer(form: ConfigForm<ValueRouterConfig>, field: string): Record<string, unknown> | undefined {
   try {
-    const user = scope.getSnapshot().user
+    const user = form.getSnapshot().user
     if (typeof user !== 'object' || user === null) return undefined
     const value = (user as Record<string, unknown>)[field]
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined

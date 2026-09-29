@@ -3,28 +3,32 @@
  *
  * 设计约束：
  * - 缺少字段必须回落到安全默认值，旧配置缺新增字段仍可加载（逐字段独立兜底）；
+ * - **永不抛错**。DSH 0.1.7-rc.2 删掉了插件可注册的 settings validate 回调
+ *   （dsh-settings 的 SettingsForms 没有 validate 钩子），在这里抛错会让整个
+ *   插件树加载失败。半配置一律 sanitize 成「未配置」并记 warn，不中断会话；
  * - 本模块是纯逻辑，不 import 任何运行时依赖，便于离线单测；
  * - 插件不保存任何凭据。
  *
- * 退役记录（2026-09-22）：桥接通道（Chat2API 外发）整体删除，配置面随之从
- * 30+ 字段收缩到 5 个。被删除的都是**桥的所有权**：bridge.*、tuning.*、
- * autoDelegate、任务类型白名单、allowCodeSnippet / allowLocalFileContent /
- * requireConfirmationForCommands、defaultThinking、fallbackMode、maxDepth。
- * 保留的字段同时服务两条通道中的幸存者（子代理路由）：
- * scope / excludePresets 是生效范围，strategy 驱动派发提示文案，executor 是路由目标。
+ * 2026-09-29（0.2.0）变更：
+ * - 摘除专属预设，删除 `scope` / `excludePresets` 两个字段。旧配置里的 `scope` 值
+ *   会变成未知键，而 schemastery 的 object 解析在非 strict 模式下会 merge 保留未知键，
+ *   因此**不需要迁移代码，也不会让插件加载失败**。保留一个默认值错误的枚举反而更危险
+ *   ——旧值 'preset' 会让 scopeAllowsPreset 把所有会话判为不在范围，且无任何报错。
+ * - 新增 `pool`（轮转线路池）与 `ambiguousPolicy`。
+ * - `executor` 语义从「子代理执行模型（唯一目标）」改为「兜底线路」：只在轮转池为空
+ *   或池中目标 provider 不可用时使用。**不能删**——宿主不提供任何默认 executor，
+ *   主控未显式指定模型时子代理会继承主模型（最贵的那条），删掉等于池空时直接烧主模型。
  *
- * 注意：历史 settings.yaml 里可能残留 `value-router.bridge` 块。schemastery 的
- * object 解析对未知键不报错（非 schema 键不参与迭代，strict 与否只决定是否透传），
- * 因此旧配置不会让插件加载失败——不需要手工清理设置文件。
+ * 更早的退役记录（2026-09-22）：桥接通道（Chat2API 外发）整体删除，配置面从
+ * 30+ 字段收缩到当时的 5 个。被删除的都是桥的所有权：bridge.*、tuning.*、
+ * autoDelegate、allowCodeSnippet / allowLocalFileContent /
+ * requireConfirmationForCommands、defaultThinking、fallbackMode、maxDepth。
  */
 
 export const VALUE_ROUTER_SETTINGS_NAMESPACE = 'value-router'
 
-/** 专属预设 id（scope = preset 时唯一生效的预设）。 */
-export const VALUE_ROUTER_PRESET_ID = 'value-router'
-
-/** 生效范围：专属预设内 / 全局所有预设（可用 excludePresets 排除）。 */
-export type ValueRouterScope = 'preset' | 'global'
+/** 轮转池的硬上限：多样性收益在 3-4 条饱和，再多只会扩大主控的选择空间。 */
+export const POOL_MAX_LINES = 4
 
 /** 三档策略：决定子代理派发提示文案的积极程度。 */
 export type ValueRouterStrategy = 'saver' | 'balanced' | 'powerful'
@@ -32,18 +36,48 @@ export type ValueRouterStrategy = 'saver' | 'balanced' | 'powerful'
 /** 系统提示段角色：主控模型 / 执行子代理。 */
 export type ValueRouterRole = 'controller' | 'subagent'
 
-/** DSH 模型路由选择（executor 目标）。 */
+/** 线路档位标注。仅用于①生成提示词文案 ②UI 排序分组，**不参与路由判据**。 */
+export type ValueRouterTier = 'cheap' | 'mid' | 'strong'
+
+/**
+ * 「显式指定 == 父模型」这一固有歧义的处置。
+ *
+ * `agent/request` 的 `next()` 只能给出「本次请求实际会用的线路」，无法区分
+ * 「主控没指定，子代理继承了父模型」和「主控显式指定了和父模型一样的线路」。
+ * - rotate（默认）：当作没指定，交给轮转。省 token，符合本插件的存在目的。
+ * - respect：当没指定处理，保留继承。主控极少显式指定与父相同的模型，选它是为了
+ *   「绝不擅自改动主控明确写下的东西」。
+ */
+export type AmbiguousPolicy = 'rotate' | 'respect'
+
+/** DSH 模型路由选择。 */
 export interface ModelRouteSelection {
   provider?: string
   model?: string
   reasoningEffort?: string
 }
 
-/** 归一化后的模型路由选择：三个字段都保证是字符串（resolveModelRoute 的产物）。 */
+/** 归一化后的模型路由选择：三个字段都保证是字符串。 */
 export interface ResolvedModelRoute {
   provider: string
   model: string
   reasoningEffort: string
+}
+
+/** 轮转池里的一条线路。 */
+export interface PoolLine {
+  provider: string
+  model: string
+  reasoningEffort?: string
+  tier: ValueRouterTier
+}
+
+/** 归一化后的池内线路（reasoningEffort 归一化为字符串，可为空）。 */
+export interface ResolvedPoolLine {
+  provider: string
+  model: string
+  reasoningEffort: string
+  tier: ValueRouterTier
 }
 
 /** 会话级覆写（顶栏气泡写入，不污染全局配置）。 */
@@ -57,33 +91,33 @@ export interface SessionOverrideConfig {
 export interface ValueRouterConfig {
   /** 总开关。 */
   enabled?: boolean
-  scope?: ValueRouterScope
-  /** 仅 global 模式生效的排除清单。 */
-  excludePresets?: string[]
   strategy?: ValueRouterStrategy
-  /** 子代理路由目标（DSH provider 模型）。 */
+  /** 轮转线路池，最多 POOL_MAX_LINES 条；空池 = 只做提示词，不改写任何线路。 */
+  pool?: PoolLine[]
+  /** 兜底线路：池为空、或池中目标 provider 不可用时使用。 */
   executor?: ModelRouteSelection
+  ambiguousPolicy?: AmbiguousPolicy
 }
 
-/** 归一化后的配置：所有字段必填，策略推导已完成。 */
+/** 归一化后的配置：所有字段必填。 */
 export interface ResolvedValueRouterConfig {
   enabled: boolean
-  scope: ValueRouterScope
-  excludePresets: string[]
   strategy: ValueRouterStrategy
+  pool: ResolvedPoolLine[]
   executor: ResolvedModelRoute
+  ambiguousPolicy: AmbiguousPolicy
 }
 
 export const DEFAULT_STRATEGY: ValueRouterStrategy = 'balanced'
-export const DEFAULT_SCOPE: ValueRouterScope = 'preset'
+export const DEFAULT_AMBIGUOUS_POLICY: AmbiguousPolicy = 'rotate'
 
 /** 默认配置（`resolveConfig(undefined)` 的结果）。 */
 export const DEFAULT_CONFIG: ResolvedValueRouterConfig = {
   enabled: true,
-  scope: DEFAULT_SCOPE,
-  excludePresets: [],
   strategy: DEFAULT_STRATEGY,
+  pool: [],
   executor: { provider: '', model: '', reasoningEffort: '' },
+  ambiguousPolicy: DEFAULT_AMBIGUOUS_POLICY,
 }
 
 // —————————————————————————— 归一化辅助 ——————————————————————————
@@ -92,24 +126,49 @@ function bool(v: unknown, dflt: boolean): boolean {
   return typeof v === 'boolean' ? v : dflt
 }
 
-/** 允许显式清空的字符串清单（excludePresets：空数组就是「不排除任何预设」）。 */
-function strListAllowEmpty(v: unknown, dflt: string[]): string[] {
-  if (!Array.isArray(v)) return [...dflt]
-  return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
-}
-
 function oneOf<T extends string>(v: unknown, allowed: readonly T[], dflt: T): T {
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : dflt
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : ''
 }
 
 /** 归一化模型路由选择：全部为 trim 后的字符串，缺省空串。 */
 export function resolveModelRoute(v: unknown): ResolvedModelRoute {
   const raw = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>
   return {
-    provider: typeof raw.provider === 'string' ? raw.provider.trim() : '',
-    model: typeof raw.model === 'string' ? raw.model.trim() : '',
-    reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort.trim() : '',
+    provider: str(raw.provider),
+    model: str(raw.model),
+    reasoningEffort: str(raw.reasoningEffort),
   }
+}
+
+/**
+ * 归一化轮转池。
+ *
+ * 逐项校验：**单项非法只丢这一项，不整池丢弃**——用户在设置里编辑到一半的半成品
+ * 不应该让其余线路全部失效。超出上限时截断到前 POOL_MAX_LINES 条（保持用户排在前面的
+ * 高优先级线路）。tier 缺失或非法时回落到 'mid'（中性档）。
+ */
+export function resolvePool(v: unknown): ResolvedPoolLine[] {
+  if (!Array.isArray(v)) return []
+  const out: ResolvedPoolLine[] = []
+  for (const item of v) {
+    if (out.length >= POOL_MAX_LINES) break
+    if (typeof item !== 'object' || item === null) continue
+    const raw = item as Record<string, unknown>
+    const provider = str(raw.provider)
+    const model = str(raw.model)
+    if (provider === '' || model === '') continue
+    out.push({
+      provider,
+      model,
+      reasoningEffort: str(raw.reasoningEffort),
+      tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
+    })
+  }
+  return out
 }
 
 /**
@@ -122,16 +181,16 @@ export function resolveConfig(raw: Partial<ValueRouterConfig> | undefined | null
   const c = raw ?? {}
   return {
     enabled: bool(c.enabled, DEFAULT_CONFIG.enabled),
-    scope: oneOf(c.scope, ['preset', 'global'] as const, DEFAULT_SCOPE),
-    excludePresets: strListAllowEmpty(c.excludePresets, DEFAULT_CONFIG.excludePresets),
     strategy: oneOf(c.strategy, ['saver', 'balanced', 'powerful'] as const, DEFAULT_STRATEGY),
+    pool: resolvePool(c.pool),
     executor: resolveModelRoute(c.executor),
+    ambiguousPolicy: oneOf(c.ambiguousPolicy, ['rotate', 'respect'] as const, DEFAULT_AMBIGUOUS_POLICY),
   }
 }
 
 // —————————————————————————— 路由/会话辅助 ——————————————————————————
 
-/** executor 路由是否完整（provider + model 都非空）。 */
+/** 模型路由是否完整（provider + model 都非空）。 */
 export function isCompleteModelRoute(
   route?: ModelRouteSelection,
 ): route is ModelRouteSelection & { provider: string; model: string } {
@@ -143,6 +202,21 @@ export function isCompleteModelRoute(
   )
 }
 
+/**
+ * 半配置的 executor（只填了 provider 或只填了 model）归一化为「未配置」。
+ *
+ * 旧版本试图用 `assertConfigValid` 在设置写入时拒绝半配置，但那个函数在 0.1.0 里
+ * **根本没有调用点**（死导入），所以线上一直存在半配置的可能。0.2.0 把处理下沉到
+ * 读路径：半配置 = 兜底线路不可用 = 退化成「不改写」，而不是抛错让插件树加载失败。
+ */
+export function sanitizeExecutor(route: ResolvedModelRoute): ResolvedModelRoute {
+  if (route.provider === '' && route.model === '') return route
+  if (route.provider === '' || route.model === '') {
+    return { provider: '', model: '', reasoningEffort: '' }
+  }
+  return route
+}
+
 /** 人读的模型标签，用于系统提示段。 */
 export function formatModelRoute(route?: ModelRouteSelection): string {
   if (!isCompleteModelRoute(route)) return '（未配置）'
@@ -151,6 +225,10 @@ export function formatModelRoute(route?: ModelRouteSelection): string {
 
 /**
  * 合并全局配置与会话级覆写（覆写只覆盖显式给出的字段）。
+ *
+ * 注意：会话级覆写**不覆盖 pool 与 ambiguousPolicy**——轮转序号是按父会话累计的，
+ * 临时改池会让同一父会话下的前后子代理跳线路，破坏「同一会话生命周期内线路不变」
+ * 这条不变量。气泡只允许临时关掉通道或改档位/兜底线路。
  */
 export function resolveSessionConfig(
   globalConfig: Partial<ValueRouterConfig> = {},
@@ -173,38 +251,14 @@ export function resolveEffectiveConfig(
   return resolveConfig(resolveSessionConfig(globalConfig ?? {}, override))
 }
 
-/**
- * 生效范围门控：
- * - preset：只有 agentPreset === 'value-router' 的会话生效；
- * - global：除 excludePresets 之外的预设全部生效（未选择预设的会话也生效）。
- */
-export function scopeAllowsPreset(config: ResolvedValueRouterConfig, agentPreset?: string): boolean {
-  if (config.scope === 'preset') return agentPreset === VALUE_ROUTER_PRESET_ID
-  if (typeof agentPreset === 'string' && config.excludePresets.includes(agentPreset)) return false
-  return true
-}
-
 /** 策略人读名（系统提示段与 UI 共用）。 */
 export function strategyLabel(strategy: ValueRouterStrategy): string {
   return strategy === 'saver' ? '更省' : strategy === 'powerful' ? '更强' : '平衡'
 }
 
-/**
- * 设置校验：拒绝「半配置」的 executor（只填了 provider 或只填了 model）。
- *
- * 完全为空是**合法**状态，表示尚未选择执行模型：子代理通道自动关闭
- * （routing.ts 的 `executor-incomplete`），插件照常加载，用户可在首次引导或
- * 设置卡里补全。因此这里不能要求 executor 必须完整——settings 的 validate 会在
- * 注册命名空间时就被调用一次，抛错会让整个插件树加载失败（实测踩过）。
- */
-export function assertConfigValid(raw: Partial<ValueRouterConfig> | undefined | null): void {
-  const resolved = resolveConfig(raw)
-  if (!resolved.enabled) return
-  const provider = resolved.executor.provider.trim()
-  const model = resolved.executor.model.trim()
-  if ((provider === '') !== (model === '')) {
-    throw new Error('子代理执行模型（executor）需要同时选择 provider 与 model，或两者都留空')
-  }
+/** 档位人读名。 */
+export function tierLabel(tier: ValueRouterTier): string {
+  return tier === 'cheap' ? '省' : tier === 'strong' ? '强' : '中'
 }
 
 /**

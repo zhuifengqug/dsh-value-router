@@ -2,61 +2,51 @@
  * 顶栏「价值路由」徽章 + 快捷设置气泡。
  *
  * 三件事：
- * - 徽章文案含策略与 scope 标记（预设 / 全局）；
- * - 气泡展示策略、executor（provider/model/状态）、scope、本会话与累计 executor
- *   调用次数；
+ * - 徽章显示当前档位与轮转池规模；
+ * - 气泡展示轮转池、兜底线路与健康、本会话/累计改写次数；
  * - 「全局默认 / 仅本会话」切换：仅本会话时经 Remote `setSessionOverride` 写宿主
  *   （只进宿主内存，不污染全局设置），并提供重置。
  *
- * 首次引导（executor + 策略 + scope）也在这里就地展开，与 Hero 引导同一套数据流。
+ * 0.2.0：删除了「生效范围（专属预设 / 所有预设）」相关的全部 UI 与遥测——
+ * 插件对全部预设生效，没有可切换的范围。同理删掉了「进入专属预设时自动开启 +
+ * 自动弹引导」这条链路，它的前提（专属预设存在）已经不存在了。
  */
 
 import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
   ModelRouteSelection,
   SessionOverrideConfig,
   ValueRouterConfig,
-  ValueRouterScope,
   ValueRouterStrategy,
 } from '../core/config.ts'
-import {
-  VALUE_ROUTER_PRESET_ID,
-  isCompleteModelRoute,
-  resolveEffectiveConfig,
-  strategyLabel,
-} from '../core/config.ts'
+import { isCompleteModelRoute, resolveEffectiveConfig, strategyLabel } from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
-import { useSettingsValue, useValueRouterConfig } from './useValueRouterConfig.ts'
+import { useValueRouterConfig } from './useValueRouterConfig.ts'
 import { useLiveSessionMetrics, useLiveStatus, writeSessionOverride } from './use-live-status.ts'
 import styles from './value-router.module.css'
 import headerStyles from './value-router-header.module.css'
 import { reportValueRouterTelemetry } from './telemetry.ts'
 
-export interface SessionPresetEntry {
-  agentPreset?: string
-  projectionValues?: { agentPreset?: string }
-}
-
 export interface ValueRouterHeaderStatusProps {
   config: ValueRouterConfig
   sessionId: string
-  useSessions: <T>(selector: (state: { byId: Record<string, SessionPresetEntry> }) => T) => T
-  settingsScope?: SettingsScope<ValueRouterConfig>
+  useSessions?: <T>(selector: (state: { byId: Record<string, unknown> }) => T) => T
+  configForm?: ConfigForm<ValueRouterConfig>
   onChange: (patch: Partial<ValueRouterConfig>) => Promise<void> | void
   fetchModels?: () => Promise<ValueRouterModelCatalog>
   /** 宿主 client context：传入后经 Remote 直连读宿主侧真实状态与会话计量。 */
   clientCtx?: Context
 }
 
-type ScopeMode = 'global' | 'session'
+/** 写入落点：全局设置，还是只覆盖本会话。 */
+type WriteMode = 'global' | 'session'
 
 interface SetupDraft {
   executor: ModelRouteSelection
   strategy: ValueRouterStrategy
-  scope: ValueRouterScope
 }
 
 function formatModel(route?: ModelRouteSelection): string {
@@ -75,8 +65,7 @@ function executorStatusText(status: 'active' | 'disabled' | 'unconfigured' | 'de
 export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = ({
   config,
   sessionId,
-  useSessions,
-  settingsScope,
+  configForm,
   onChange,
   fetchModels,
   clientCtx,
@@ -84,50 +73,41 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const [open, setOpen] = useState(false)
   const [onboarding, setOnboarding] = useState(false)
   const [pickingExecutor, setPickingExecutor] = useState(false)
-  const [scopeMode, setScopeMode] = useState<ScopeMode>('global')
-  const [setupDraft, setSetupDraft] = useState<SetupDraft>({ executor: {}, strategy: 'balanced', scope: 'preset' })
+  const [writeMode, setWriteMode] = useState<WriteMode>('global')
+  const [setupDraft, setSetupDraft] = useState<SetupDraft>({ executor: {}, strategy: 'balanced' })
   const [setupError, setSetupError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [metricsToken, setMetricsToken] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const handledEntryRef = useRef<string | null>(null)
   const overrideRef = useRef<SessionOverrideConfig | null>(null)
 
-  // 官方 AgentPresetLabel 从 state.byId[sessionId]?.projectionValues?.agentPreset 读预设，
-  // 这里读同一条路径，保证徽章的显示条件与官方标签一致。
-  const activePreset = useSessions((state) => {
-    const entry = state.byId[sessionId]
-    const projected = entry?.projectionValues?.agentPreset
-    if (typeof projected === 'string') return projected
-    return entry?.agentPreset
-  })
-
-  const liveConfig = useValueRouterConfig(settingsScope, config)
+  const liveConfig = useValueRouterConfig(configForm, config)
   const liveStatus = useLiveStatus(clientCtx, open)
   const liveMetrics = useLiveSessionMetrics(clientCtx, sessionId, open, metricsToken)
   const sessionOverride = liveMetrics?.override ?? null
   const resolved = resolveEffectiveConfig(liveConfig, sessionOverride ?? undefined)
-  const configured = isCompleteModelRoute(resolved.executor)
-  const inScope = resolved.scope === 'global' || activePreset === VALUE_ROUTER_PRESET_ID
+  const fallbackComplete = isCompleteModelRoute(resolved.executor)
+  const poolSize = resolved.pool.length
+  const configured = poolSize > 0 || fallbackComplete
 
   useEffect(() => {
     overrideRef.current = sessionOverride
     // 宿主存在覆写就显示「仅本会话」，否则回到「全局默认」。用户点「仅本会话」但尚未
     // 写入任何字段时不会被这条同步覆盖（sessionOverride 引用未变，effect 不重跑）。
-    setScopeMode(sessionOverride ? 'session' : 'global')
+    setWriteMode(sessionOverride ? 'session' : 'global')
   }, [sessionOverride])
 
-  const startOnboarding = () => {
-    setSetupDraft({ executor: { ...resolved.executor }, strategy: resolved.strategy, scope: resolved.scope })
+  const startOnboarding = (): void => {
+    setSetupDraft({ executor: { ...resolved.executor }, strategy: resolved.strategy })
     setSetupError(null)
     setOnboarding(true)
     setOpen(true)
     reportValueRouterTelemetry({ kind: 'onboarding', outcome: 'shown', surface: 'header' }, `value-router-onboarding-shown:header:${sessionId}`)
   }
 
-  const dismissOnboarding = () => {
+  const dismissOnboarding = (): void => {
     if (onboarding) reportValueRouterTelemetry({ kind: 'onboarding', outcome: 'dismissed', surface: 'header' })
     setOpen(false)
     setOnboarding(false)
@@ -161,8 +141,8 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   }
 
   /** 会话档：把 patch 合并进已有覆写；全局档：写全局设置。 */
-  const applySessionScoped = async (patch: SessionOverrideConfig, fallback: string): Promise<void> => {
-    if (scopeMode === 'session') {
+  const applyScoped = async (patch: SessionOverrideConfig, fallback: string): Promise<void> => {
+    if (writeMode === 'session') {
       await persistOverride({ ...(overrideRef.current ?? {}), ...patch }, fallback)
       return
     }
@@ -172,28 +152,6 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     if (patch.executor !== undefined) globalPatch.executor = patch.executor
     await persistGlobalPatch(globalPatch, fallback)
   }
-
-  useEffect(() => {
-    if (activePreset !== VALUE_ROUTER_PRESET_ID) {
-      handledEntryRef.current = null
-      return
-    }
-    const entryKey = `${sessionId}:${VALUE_ROUTER_PRESET_ID}`
-    if (handledEntryRef.current === entryKey) return
-    handledEntryRef.current = entryKey
-    reportValueRouterTelemetry({ kind: 'entry', configured, source: 'header' }, 'value-router-entry')
-
-    if (configured) {
-      if (!resolved.enabled) {
-        void Promise.resolve()
-          .then(() => onChange({ enabled: true }))
-          .then(() => reportValueRouterTelemetry({ kind: 'state', state: 'enabled', source: 'auto' }))
-          .catch(() => reportValueRouterTelemetry({ kind: 'state', state: 'failed', source: 'auto' }))
-      }
-    } else {
-      startOnboarding()
-    }
-  }, [activePreset, sessionId, configured])
 
   useEffect(() => {
     if (!open) return
@@ -233,14 +191,14 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
 
   const handleToggle = async (): Promise<void> => {
     const nextEnabled = !resolved.enabled
-    await applySessionScoped(
+    await applyScoped(
       { enabled: nextEnabled },
       nextEnabled ? '价值路由开启失败，请重试。' : '价值路由关闭失败，请重试。',
     )
     reportValueRouterTelemetry({
       kind: 'state',
       state: nextEnabled ? 'enabled' : 'disabled',
-      source: scopeMode === 'session' ? 'session' : 'manual',
+      source: writeMode === 'session' ? 'session' : 'manual',
     })
   }
 
@@ -248,25 +206,16 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     if (onboarding) {
       setSetupDraft((draft) => ({ ...draft, strategy: nextStrategy }))
     } else {
-      await applySessionScoped({ strategy: nextStrategy }, '策略保存失败，请重试。')
+      await applyScoped({ strategy: nextStrategy }, '策略保存失败，请重试。')
     }
     reportValueRouterTelemetry({ kind: 'strategy', strategy: nextStrategy })
-  }
-
-  const handleScopeChange = async (nextScope: ValueRouterScope): Promise<void> => {
-    if (onboarding) {
-      setSetupDraft((draft) => ({ ...draft, scope: nextScope }))
-    } else {
-      await persistGlobalPatch({ scope: nextScope }, '生效范围保存失败，请重试。')
-    }
-    reportValueRouterTelemetry({ kind: 'scope', scope: nextScope })
   }
 
   const handleModelSelect = (selection: ModelRouteSelection): void => {
     if (onboarding) {
       setSetupDraft((draft) => ({ ...draft, executor: selection }))
     } else {
-      void applySessionScoped({ executor: selection }, 'executor 保存失败，请重试。')
+      void applyScoped({ executor: selection }, '兜底线路保存失败，请重试。')
     }
     setPickingExecutor(false)
   }
@@ -274,19 +223,14 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const handleResetOverride = async (): Promise<void> => {
     const ok = await persistOverride(null, '会话覆写重置失败，请重试。')
     if (ok) {
-      setScopeMode('global')
+      setWriteMode('global')
       reportValueRouterTelemetry({ kind: 'session-override', action: 'reset' })
     }
   }
 
-  const handleSwitchToSession = (): void => {
-    setScopeMode('session')
-    reportValueRouterTelemetry({ kind: 'session-override', action: 'set' })
-  }
-
   const handleCompleteSetup = async (): Promise<void> => {
     if (!isCompleteModelRoute(setupDraft.executor)) {
-      setSetupError('请先选择 executor 子代理执行模型。')
+      setSetupError('请先选择兜底线路。完整的多模型配置（轮转池）请到「设置 → 插件」里添加。')
       return
     }
     setSaving(true)
@@ -295,7 +239,6 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       // enabled 单独最后写，避免「部分配置」被提前激活。
       await onChange({ executor: setupDraft.executor })
       await onChange({ strategy: setupDraft.strategy })
-      await onChange({ scope: setupDraft.scope })
       await onChange({ enabled: true })
       setOnboarding(false)
       setOpen(false)
@@ -309,9 +252,6 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     }
   }
 
-  if (!inScope) return null
-
-  const scopeTag = resolved.scope === 'global' ? '全局' : '预设'
   const label = !configured
     ? '价值路由 · 待配置'
     : !resolved.enabled
@@ -328,40 +268,49 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       <div className={headerStyles.popoverHeader}>
         <span className={styles.title}>价值路由</span>
         <span className={`${styles.badge} ${statusClass}`}>
-          {resolved.enabled ? configured ? '已开启' : '配置不完整' : configured ? '已关闭' : '待配置'}
+          {resolved.enabled ? (configured ? '已开启' : '配置不完整') : (configured ? '已关闭' : '待配置')}
         </span>
       </div>
 
       {setupError && <div className={headerStyles.setupError} role="alert">{setupError}</div>}
 
-      <div className={styles.scopeSwitcher} role="group" aria-label="生效范围">
+      <div className={styles.scopeSwitcher} role="group" aria-label="写入范围">
         <button
           type="button"
-          className={`${styles.scopeButton} ${scopeMode === 'global' ? styles.scopeButtonActive : ''}`}
-          aria-pressed={scopeMode === 'global'}
-          onClick={() => setScopeMode('global')}
+          className={`${styles.scopeButton} ${writeMode === 'global' ? styles.scopeButtonActive : ''}`}
+          aria-pressed={writeMode === 'global'}
+          onClick={() => setWriteMode('global')}
         >
           全局默认
         </button>
         <button
           type="button"
-          className={`${styles.scopeButton} ${scopeMode === 'session' ? styles.scopeButtonActive : ''}`}
-          aria-pressed={scopeMode === 'session'}
-          onClick={handleSwitchToSession}
+          className={`${styles.scopeButton} ${writeMode === 'session' ? styles.scopeButtonActive : ''}`}
+          aria-pressed={writeMode === 'session'}
+          onClick={() => {
+            setWriteMode('session')
+            reportValueRouterTelemetry({ kind: 'session-override', action: 'set' })
+          }}
         >
           仅本会话{sessionOverride ? '（已覆写）' : ''}
         </button>
       </div>
-      <div className={headerStyles.setupHint}>会话覆写只写宿主内存，不改动全局设置。</div>
+      <div className={headerStyles.setupHint}>会话覆写只写宿主内存，不改动全局设置；轮转池只能全局配置。</div>
 
       <div className={styles.roleSummary}>
         <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>executor:</span>
+          <span className={styles.popoverItemLabel}>轮转池:</span>
+          <span className={styles.popoverItemValue}>
+            {poolSize > 0 ? resolved.pool.map((line) => line.model).join(' → ') : '未配置（子代理将继承主模型）'}
+          </span>
+        </div>
+        <div className={styles.popoverItem}>
+          <span className={styles.popoverItemLabel}>兜底线路:</span>
           <span className={styles.popoverItemValue}>{formatModel(resolved.executor)}</span>
         </div>
         {liveStatus && (
           <div className={styles.popoverItem}>
-            <span className={styles.popoverItemLabel}>executor 状态:</span>
+            <span className={styles.popoverItemLabel}>兜底线路状态:</span>
             <span className={styles.popoverItemValue}>
               {executorStatusText(liveStatus.executorStatus)}
               {liveStatus.executorReason ? ` · ${liveStatus.executorReason}` : ''}
@@ -369,29 +318,25 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
           </div>
         )}
         <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>当前策略:</span>
+          <span className={styles.popoverItemLabel}>派发倾向:</span>
           <span className={styles.popoverItemValue}>{strategyLabel(resolved.strategy)}</span>
-        </div>
-        <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>生效范围:</span>
-          <span className={styles.popoverItemValue}>{resolved.scope === 'global' ? '所有预设' : '仅专属预设'}</span>
         </div>
       </div>
 
       <div className={styles.statsCard}>
         <div className={styles.statItem}>
-          <span className={styles.statItemLabel}>本会话 executor 调用</span>
+          <span className={styles.statItemLabel}>本会话改写</span>
           <span className={styles.statItemValue}>{liveMetrics?.executorCalls ?? 0} 次</span>
         </div>
         <div className={styles.statItem}>
-          <span className={styles.statItemLabel}>累计 executor 调用</span>
+          <span className={styles.statItemLabel}>累计改写</span>
           <span className={styles.statItemValue}>{liveStatus?.executorCallsTotal ?? 0} 次</span>
         </div>
       </div>
 
       <div className={headerStyles.actionStack}>
         <div className={headerStyles.actionRow}>
-          <button type="button" className={`${styles.button} ${headerStyles.actionButton}`} onClick={() => setPickingExecutor(true)}>换 executor</button>
+          <button type="button" className={`${styles.button} ${headerStyles.actionButton}`} onClick={() => setPickingExecutor(true)}>换兜底线路</button>
           <button
             type="button"
             className={`${styles.button} ${headerStyles.actionButton}`}
@@ -400,14 +345,7 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
               void handleStrategyChange(next)
             }}
           >
-            切策略
-          </button>
-          <button
-            type="button"
-            className={`${styles.button} ${headerStyles.actionButton}`}
-            onClick={() => void handleScopeChange(resolved.scope === 'global' ? 'preset' : 'global')}
-          >
-            切范围
+            切档位
           </button>
         </div>
         <div className={headerStyles.actionRow}>
@@ -419,7 +357,7 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
           >
             {resolved.enabled ? '关闭路由' : '开启路由'}
           </button>
-          {scopeMode === 'session' && sessionOverride && (
+          {writeMode === 'session' && sessionOverride && (
             <button type="button" className={`${styles.button} ${headerStyles.actionButton}`} onClick={() => void handleResetOverride()}>
               重置会话覆写
             </button>
@@ -439,16 +377,16 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         <button type="button" className={headerStyles.setupClose} aria-label="关闭价值路由引导" onClick={dismissOnboarding}>×</button>
       </div>
       <p className={headerStyles.setupLead}>
-        主模型负责理解与最终交付，executor 只执行下沉的子任务。先确认执行模型，完成后即可开启。
+        主模型负责理解与最终交付，子代理负责并行执行。先给一条兜底线路——完整的多模型轮转池请到「设置 → 插件」里配置。
       </p>
 
       <div className={headerStyles.setupSteps}>
         <div className={`${headerStyles.setupStep} ${isCompleteModelRoute(setupDraft.executor) ? headerStyles.setupStepReady : ''}`}>
           <span className={headerStyles.setupStepNumber}>01</span>
           <div className={headerStyles.setupStepBody}>
-            <div className={headerStyles.setupStepHeading}>executor 子代理执行模型</div>
+            <div className={headerStyles.setupStepHeading}>兜底线路</div>
             <div className={headerStyles.setupStepValue}>{formatModel(setupDraft.executor)}</div>
-            <div className={headerStyles.setupDefaultNote}>用于并行调查、局部实现和重复性工作</div>
+            <div className={headerStyles.setupDefaultNote}>池为空或目标 provider 不可用时使用</div>
           </div>
           <button type="button" className={`${styles.button} ${headerStyles.setupModelButton}`} onClick={() => setPickingExecutor(true)}>
             {isCompleteModelRoute(setupDraft.executor) ? '更换' : '选择'}
@@ -457,7 +395,7 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       </div>
 
       <div className={headerStyles.setupStrategy}>
-        <div className={headerStyles.setupStrategyLabel}>02 · 运行策略</div>
+        <div className={headerStyles.setupStrategyLabel}>02 · 派发倾向</div>
         <div className={styles.strategyGroup}>
           {(['saver', 'balanced', 'powerful'] as const).map((strategy) => (
             <button
@@ -468,31 +406,11 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
               onClick={() => void handleStrategyChange(strategy)}
             >
               <span className={styles.strategyTitle}>{strategyLabel(strategy)}</span>
-              <span className={styles.strategyDesc}>{strategy === 'saver' ? '少派发，控制调用量' : strategy === 'powerful' ? '积极并行，优先质量' : '按任务复杂度派发'}</span>
+              <span className={styles.strategyDesc}>
+                {strategy === 'saver' ? '少派发，控制调用量' : strategy === 'powerful' ? '积极并行，优先质量' : '按任务复杂度派发'}
+              </span>
             </button>
           ))}
-        </div>
-      </div>
-
-      <div className={headerStyles.setupStrategy}>
-        <div className={headerStyles.setupStrategyLabel}>03 · 生效范围</div>
-        <div className={styles.scopeSwitcher} role="group" aria-label="生效范围">
-          <button
-            type="button"
-            className={`${styles.scopeButton} ${setupDraft.scope === 'preset' ? styles.scopeButtonActive : ''}`}
-            aria-pressed={setupDraft.scope === 'preset'}
-            onClick={() => void handleScopeChange('preset')}
-          >
-            仅专属预设
-          </button>
-          <button
-            type="button"
-            className={`${styles.scopeButton} ${setupDraft.scope === 'global' ? styles.scopeButtonActive : ''}`}
-            aria-pressed={setupDraft.scope === 'global'}
-            onClick={() => void handleScopeChange('global')}
-          >
-            所有预设
-          </button>
         </div>
       </div>
 
@@ -541,14 +459,14 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       >
         <span aria-hidden="true">VR</span>
         <span>{label}</span>
-        <span className={styles.scopeTag}>{scopeTag}</span>
+        <span className={styles.scopeTag}>{poolSize > 0 ? `池 ${poolSize}` : '无池'}</span>
       </button>
 
       {open && renderPortal(popover)}
 
       {pickingExecutor && (
         <ModelPicker
-          title="选择 executor 子代理执行模型"
+          title="选择兜底线路"
           current={onboarding ? setupDraft.executor : resolved.executor}
           onSelect={handleModelSelect}
           onClose={() => setPickingExecutor(false)}

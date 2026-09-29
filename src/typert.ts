@@ -55,8 +55,13 @@ const setSessionOverrideInput = z.object({
 
 const statusResultSchema = z.object({
   enabled: z.boolean(),
-  scope: z.enum(['preset', 'global']),
   strategy: z.enum(['saver', 'balanced', 'powerful']),
+  pool: z.array(z.object({
+    provider: z.string(),
+    model: z.string(),
+    reasoningEffort: z.string(),
+    tier: z.enum(['cheap', 'mid', 'strong']),
+  }).strict()),
   executor: routeSelectionSchema,
   executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
   executorReason: z.string().optional(),

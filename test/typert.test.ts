@@ -16,17 +16,35 @@ import { TYPERT } from '../src/typert.ts'
 const PKG = '@gjs27/dsh-value-router'
 const TYPES = `${PKG}/types`
 
-/** 复刻 loader 的 requireStrictCodec。 */
-function assertStrictCodec(codec: unknown, subject: string): asserts codec is { mode: string; typeSymbol: string; schema: { parse: (v: unknown) => unknown } } {
+/**
+ * 复刻 loader 的 requireStrictCodec（dsh-typert-loader/lib/index.js:206-211）。
+ *
+ * 2026-09-29 更正：0.1.7-rc.2 的 loader **不再读取 codec.schema**，它要求的是
+ * `create()` 惰性工厂——`typeof codec.create === 'function'`。src/typert.ts 早就是
+ * 按 create() 实现的（见其 memoizeSchema 注释），是这份复刻断言没跟上。
+ */
+function assertStrictCodec(codec: unknown, subject: string): asserts codec is { mode: string; typeSymbol: string; create: () => unknown } {
   assert.equal(typeof codec, 'object', `${subject} 必须是对象`)
   assert.ok(codec !== null, `${subject} 不能是 null`)
   const value = codec as Record<string, unknown>
   assert.equal(value.mode, 'strict', `${subject} 必须是 strict codec`)
   assert.equal(typeof value.typeSymbol, 'string', `${subject} 需要 typeSymbol`)
-  const schema = value.schema as Record<string, unknown> | null
-  assert.ok(schema !== null && typeof schema === 'object', `${subject} 需要 schema`)
+  for (const method of ['decode', 'encode']) {
+    if (value[method] !== undefined) {
+      assert.equal(typeof value[method], 'function', `${subject} 的 ${method} 必须是函数`)
+    }
+  }
+  assert.equal(typeof value.create, 'function', `${subject} 需要 create() 工厂`)
+}
+
+/** 按 loader 的用法物化 schema，并确认它确实是 zod v4 实例。 */
+function materialize(codec: unknown, subject: string): { safeParse: (v: unknown) => { success: boolean } } {
+  assertStrictCodec(codec, subject)
+  const schema = codec.create() as Record<string, unknown>
+  assert.ok(schema !== null && typeof schema === 'object', `${subject} 的 create() 必须返回对象`)
   assert.ok('_zod' in schema, `${subject} 必须是 zod v4 实例（带 _zod 标记）`)
-  assert.equal(typeof schema.parse, 'function', `${subject} 的 schema 需要 parse()`)
+  assert.equal(typeof schema.safeParse, 'function', `${subject} 的 schema 需要 safeParse()`)
+  return schema as unknown as { safeParse: (v: unknown) => { success: boolean } }
 }
 
 test('清单头字段符合 loader 要求', () => {
@@ -102,12 +120,12 @@ test('客户端 descriptor 的 typeSymbol 与宿主逐字一致', () => {
 
 test('codec schema 是严格 schema：拒绝未知字段', () => {
   const status = TYPERT.invocations[0]!
-  const result = status.result as { schema: { safeParse: (v: unknown) => { success: boolean } } }
-  assert.equal(result.schema.safeParse({ ok: true }).success, false, '未知字段应被拒绝')
-  assert.equal(result.schema.safeParse({}).success, false, '缺字段应被拒绝')
+  const result = materialize(status.result, 'status 结果')
+  assert.equal(result.safeParse({ ok: true }).success, false, '未知字段应被拒绝')
+  assert.equal(result.safeParse({}).success, false, '缺字段应被拒绝')
 
   const override = TYPERT.invocations[2]!
-  const input = (override.parameters as Array<{ codec: { schema: { safeParse: (v: unknown) => { success: boolean } } } }>)[0]!.codec.schema
+  const input = materialize((override.parameters as Array<{ codec: unknown }>)[0]!.codec, 'setSessionOverride 参数')
   assert.equal(input.safeParse({ sessionId: 's1', override: null }).success, true)
   assert.equal(input.safeParse({ sessionId: 's1', override: { strategy: 'turbo' } }).success, false, '非法档位应被拒绝')
   assert.equal(input.safeParse({ sessionId: '' }).success, false, '空 sessionId 应被拒绝')
@@ -115,40 +133,47 @@ test('codec schema 是严格 schema：拒绝未知字段', () => {
 
 test('status 结果的完整形状可通过校验（与 snapshot() 的键集一致）', () => {
   const status = TYPERT.invocations[0]!
-  const result = status.result as { schema: { safeParse: (v: unknown) => { success: boolean } } }
+  const result = materialize(status.result, 'status 结果')
   const full = {
     enabled: true,
-    scope: 'preset',
     strategy: 'balanced',
+    pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap' }],
     executor: { provider: 'p', model: 'm', reasoningEffort: '' },
     executorStatus: 'active',
     executorCallsTotal: 0,
   }
-  assert.equal(result.schema.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
+  assert.equal(result.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
   // executorReason 是唯一的可选键：给出时也必须通过
   assert.equal(
-    result.schema.safeParse({ ...full, executorStatus: 'degraded', executorReason: 'executor provider 不可用' }).success,
+    result.safeParse({ ...full, executorStatus: 'degraded', executorReason: '兜底线路 provider 不可用' }).success,
     true,
   )
   // 已退役通道的字段一律被 strict 拒绝（防止宿主/客户端悄悄回潮）
-  assert.equal(result.schema.safeParse({ ...full, delegationsTotal: 0 }).success, false, '退役字段应被拒绝')
-  assert.equal(result.schema.safeParse({ ...full, lastOutcome: 'none' }).success, false, '退役字段应被拒绝')
+  assert.equal(result.safeParse({ ...full, delegationsTotal: 0 }).success, false, '退役字段应被拒绝')
+  assert.equal(result.safeParse({ ...full, lastOutcome: 'none' }).success, false, '退役字段应被拒绝')
+  // 0.2.0 起 scope 字段已随专属预设一起退役
+  assert.equal(result.safeParse({ ...full, scope: 'global' }).success, false, '退役的 scope 字段应被拒绝')
   // 枚举值必须落在声明的取值内
-  assert.equal(result.schema.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
+  assert.equal(result.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
+  assert.equal(
+    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'ultra' }] }).success,
+    false,
+    '非法 tier 应被拒绝',
+  )
 })
 
 test('sessionMetrics 结果形状：executorCalls + override（可 null）', () => {
   const metrics = TYPERT.invocations[1]!
-  const result = metrics.result as { schema: { safeParse: (v: unknown) => { success: boolean } } }
+  const result = materialize(metrics.result, 'sessionMetrics 结果')
   const base = { executorCalls: 3, override: null }
-  assert.equal(result.schema.safeParse(base).success, true)
+  assert.equal(result.safeParse(base).success, true)
   assert.equal(
-    result.schema.safeParse({ executorCalls: 0, override: { strategy: 'saver', executor: { provider: 'p', model: 'm', reasoningEffort: 'low' } } }).success,
+    result.safeParse({ executorCalls: 0, override: { strategy: 'saver', executor: { provider: 'p', model: 'm', reasoningEffort: 'low' } } }).success,
     true,
   )
-  assert.equal(result.schema.safeParse({ executorCalls: 3 }).success, false, 'override 是必填键（可为 null）')
-  assert.equal(result.schema.safeParse({ override: null }).success, false, '缺 executorCalls 应被拒绝')
-  assert.equal(result.schema.safeParse({ ...base, extra: 1 }).success, false, '未知字段应被拒绝')
-  assert.equal(result.schema.safeParse({ ...base, executorCalls: -1 }).success, false, '负数计数应被拒绝')
-  assert.equal(result.schema.safeParse({ ...base, executorCalls: 1.5 }).success, false, '非整数计数应被拒绝')
+  assert.equal(result.safeParse({ executorCalls: 3 }).success, false, 'override 是必填键（可为 null）')
+  assert.equal(result.safeParse({ override: null }).success, false, '缺 executorCalls 应被拒绝')
+  assert.equal(result.safeParse({ ...base, extra: 1 }).success, false, '未知字段应被拒绝')
+  assert.equal(result.safeParse({ ...base, executorCalls: -1 }).success, false, '负数计数应被拒绝')
+  assert.equal(result.safeParse({ ...base, executorCalls: 1.5 }).success, false, '非整数计数应被拒绝')
 })

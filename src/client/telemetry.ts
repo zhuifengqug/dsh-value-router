@@ -9,9 +9,10 @@
 export type ValueRouterProductTelemetryEvent =
   | { kind: 'entry'; configured: boolean; source?: 'hero' | 'header' | 'settings' }
   | { kind: 'onboarding'; outcome: 'shown' | 'completed' | 'dismissed' | 'failed'; surface: 'hero' | 'header' | 'settings' }
-  | { kind: 'state'; state: 'enabled' | 'disabled' | 'failed'; source: 'onboarding' | 'manual' | 'auto' | 'settings' | 'session' }
+  | { kind: 'state'; state: 'enabled' | 'disabled' | 'failed' | 'mounted'; source: 'onboarding' | 'manual' | 'auto' | 'settings' | 'session' | 'client' }
   | { kind: 'strategy'; strategy: 'saver' | 'balanced' | 'powerful' }
-  | { kind: 'scope'; scope: 'preset' | 'global' }
+  // 0.2.0：`scope` 事件随专属预设一起退役，改为上报轮转池规模（只报条数，不报模型名）。
+  | { kind: 'pool'; size: number }
   | { kind: 'session-override'; action: 'set' | 'reset' }
 
 type DesktopTelemetryApi = {
