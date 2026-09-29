@@ -146,6 +146,10 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
     executorStatus: 'active',
     executorCallsTotal: 0,
     tierRouting: 'tier-rotate',
+    recentDispatches: [
+      { provider: 'p', model: 'm', tierIndex: 0, origin: 'pool', at: 1 },
+      { provider: 'q', model: 'm2', tierIndex: null, origin: 'fallback', at: 2 },
+    ],
     allowlistKnown: true,
   }
   assert.equal(result.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
@@ -167,6 +171,20 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
     result.safeParse({ ...full, tierRouting: 'guess' }).success,
     false,
     '非法 tierRouting 应被拒绝',
+  )
+  // 派发记录是验收依据，形状必须严格：tierIndex 用 null 表示"落在兜底线路"
+  assert.equal(
+    result.safeParse({ ...full, recentDispatches: [{ provider: 'p', model: 'm', tierIndex: 0, origin: 'pool' }] }).success,
+    false,
+    '缺 at 的派发记录应被拒绝',
+  )
+  assert.equal(
+    result.safeParse({
+      ...full,
+      recentDispatches: [{ provider: 'p', model: 'm', tierIndex: 0, origin: 'random', at: 1 }],
+    }).success,
+    false,
+    '非法 origin 应被拒绝',
   )
   // 档位缺 id/label 会被 strict 拒绝：客户端要靠它们渲染分组
   assert.equal(

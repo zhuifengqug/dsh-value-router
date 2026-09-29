@@ -476,6 +476,16 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     if (resolved.provider === decision.provider && resolved.model === decision.model) return resolved
 
     valueRouterState.recordExecutorCall(sessionId)
+    // 记下这次**实际改写**的线路：子代理会话头和 subagent 工具返回都不带模型信息，
+    // 没有这条记录，插件的轮转行为在对话里完全无法验收。
+    valueRouterState.recordDispatch({
+      sessionId: sessionId ?? '?',
+      provider: decision.provider,
+      model: decision.model,
+      tierIndex: decision.tierIndex,
+      origin: decision.tierIndex === undefined ? 'fallback' : 'pool',
+      at: Date.now(),
+    })
     const key = requestKey(payload)
     const params = routeParameters('subagent', decision.effective.strategy, decision.model)
     if (key !== undefined) {
@@ -545,6 +555,13 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         ...(executorHealth.reason !== undefined ? { executorReason: executorHealth.reason } : {}),
         executorCallsTotal: valueRouterState.getGlobalMetrics().executorCalls,
         tierRouting: c.tierRouting,
+        recentDispatches: valueRouterState.recentDispatches(12).map(record => ({
+          provider: record.provider,
+          model: record.model,
+          tierIndex: record.tierIndex ?? null,
+          origin: record.origin,
+          at: record.at,
+        })),
         allowlistKnown: hostAllowlist() !== undefined,
       }
     },

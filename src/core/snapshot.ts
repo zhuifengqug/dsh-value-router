@@ -28,8 +28,25 @@ export interface ValueRouterStatusSnapshot {
   executorCallsTotal: number
   /** 主控指定线路时的处置模式。 */
   tierRouting: TierRouting
+  /**
+   * 最近的实际派发记录，最新的在前。
+   *
+   * 这是「插件到底干了什么」的唯一可观测出口：子代理会话头不带模型信息，
+   * `subagent` 工具的返回也不带，主控与用户在对话里无法验证轮转是否真的生效。
+   */
+  recentDispatches: DispatchView[]
   /** 是否成功读到宿主白名单。false = 读不到，所有线路都被放行（宁可多派不静默清空）。 */
   allowlistKnown: boolean
+}
+
+/** 一条派发记录的对外形状（与 core/state.ts 的 DispatchRecord 对应）。 */
+export interface DispatchView {
+  provider: string
+  model: string
+  /** 实际派发的档位下标；落在兜底线路时为 null。 */
+  tierIndex: number | null
+  origin: 'pool' | 'explicit' | 'fallback'
+  at: number
 }
 
 /** 服务尚未挂载时的安全默认值（浏览器侧读到它时表示插件未加载）。 */
@@ -41,5 +58,6 @@ export const EMPTY_STATUS_SNAPSHOT: ValueRouterStatusSnapshot = {
   executorStatus: 'disabled',
   executorCallsTotal: 0,
   tierRouting: 'tier-rotate',
+  recentDispatches: [],
   allowlistKnown: false,
 }

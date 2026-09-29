@@ -66,6 +66,14 @@ const tierSchema = z.object({
   pool: z.array(poolLineSchema),
 }).strict()
 
+const dispatchSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  tierIndex: z.number().int().nonnegative().nullable(),
+  origin: z.enum(['pool', 'explicit', 'fallback']),
+  at: z.number(),
+}).strict()
+
 const statusResultSchema = z.object({
   enabled: z.boolean(),
   strategy: z.enum(['saver', 'balanced', 'powerful']),
@@ -75,6 +83,7 @@ const statusResultSchema = z.object({
   executorReason: z.string().optional(),
   executorCallsTotal: z.number().int().nonnegative(),
   tierRouting: z.enum(['tier-rotate', 'controller']),
+  recentDispatches: z.array(dispatchSchema),
   allowlistKnown: z.boolean(),
 }).strict()
 

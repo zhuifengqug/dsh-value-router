@@ -337,6 +337,29 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         </div>
       </div>
 
+      {/*
+        派发记录——「插件到底干了什么」的唯一可观测出口。
+        子代理会话头和 subagent 工具的返回都不带模型信息，所以主控和用户在对话里
+        无法验证轮转是否真的生效；这张表就是验收依据。显示 provider + model 全名，
+        否则「同一个模型挂在两家 provider」会看起来像重复。
+      */}
+      {liveStatus && liveStatus.recentDispatches.length > 0 && (
+        <div className={styles.dispatchLog}>
+          <div className={styles.dispatchLogHead}>最近派发</div>
+          {liveStatus.recentDispatches.slice(0, 8).map((record, index) => (
+            <div key={index} className={styles.dispatchRow}>
+              <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
+                {record.model}
+              </span>
+              <span className={styles.dispatchProvider}>{record.provider}</span>
+              <span className={styles.dispatchOrigin}>
+                {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className={styles.statsCard}>
         <div className={styles.statItem}>
           <span className={styles.statItemLabel}>本会话改写</span>

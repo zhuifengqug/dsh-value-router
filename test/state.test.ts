@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { valueRouterState, routeKey, type ChildRouteIntent } from '../src/core/state.ts'
+import { MAX_DISPATCH_RECORDS, valueRouterState, routeKey, type ChildRouteIntent } from '../src/core/state.ts'
 
 function intentOf(provider: string, model: string, parentRoute?: string): ChildRouteIntent {
   return {
@@ -207,4 +207,50 @@ test('全局计数与空会话指标', () => {
   valueRouterState.resetAll()
   assert.deepEqual(valueRouterState.getGlobalMetrics(), { executorCalls: 0 })
   assert.equal(valueRouterState.getParentSession('child'), undefined)
+})
+
+// —— 派发记录：插件「到底干了什么」的唯一可观测出口 ——
+
+test('派发记录：最新的在前，按 limit 截取', () => {
+  valueRouterState.resetAll()
+  for (let i = 1; i <= 3; i++) {
+    valueRouterState.recordDispatch({
+      sessionId: `s${i}`,
+      provider: 'p',
+      model: `m${i}`,
+      tierIndex: 0,
+      origin: 'pool',
+      at: i,
+    })
+  }
+  const recent = valueRouterState.recentDispatches(2)
+  assert.deepEqual(recent.map(record => record.model), ['m3', 'm2'], '最新的排在最前')
+  assert.equal(valueRouterState.recentDispatches(10).length, 3)
+})
+
+test('派发记录：有界，不会随长跑进程无限增长', () => {
+  valueRouterState.resetAll()
+  for (let i = 0; i < MAX_DISPATCH_RECORDS + 20; i++) {
+    valueRouterState.recordDispatch({
+      sessionId: `s${i}`,
+      provider: 'p',
+      model: `m${i}`,
+      tierIndex: undefined,
+      origin: 'fallback',
+      at: i,
+    })
+  }
+  const all = valueRouterState.recentDispatches(MAX_DISPATCH_RECORDS)
+  assert.equal(all.length, MAX_DISPATCH_RECORDS)
+  // 保留的是最近的那些
+  assert.equal(all[0]?.model, `m${MAX_DISPATCH_RECORDS + 19}`)
+})
+
+test('派发记录：resetAll 一并清空', () => {
+  valueRouterState.resetAll()
+  valueRouterState.recordDispatch({
+    sessionId: 's1', provider: 'p', model: 'm', tierIndex: 0, origin: 'pool', at: 1,
+  })
+  valueRouterState.resetAll()
+  assert.deepEqual(valueRouterState.recentDispatches(), [])
 })

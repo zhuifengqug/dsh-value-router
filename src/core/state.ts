@@ -63,9 +63,26 @@ function emptyMetrics(): SessionValueRouterMetrics {
   return { executorCalls: 0 }
 }
 
+/** 一次实际发生的线路改写。 */
+export interface DispatchRecord {
+  /** 被改写的子会话；缺失时记为 '?'。 */
+  readonly sessionId: string
+  readonly provider: string
+  readonly model: string
+  /** 实际派发的档位下标；落在兜底线路时为 undefined。 */
+  readonly tierIndex: number | undefined
+  /** 来源：轮转池 / 主控指定线路 / 兜底线路。 */
+  readonly origin: 'pool' | 'explicit' | 'fallback'
+  readonly at: number
+}
+
+/** 派发记录的最大条数（有界环形，长跑进程不无限增长）。 */
+export const MAX_DISPATCH_RECORDS = 50
+
 class ValueRouterStateManager {
   private sessions = new Map<string, SessionValueRouterMetrics>()
   private globalExecutorCalls = 0
+  private dispatches: DispatchRecord[] = []
   /**
    * 子会话 -> 直接父会话（来自 agent/request 的 session.header.parentSession）。
    * 含环保护，避免异常 lineage 造成死循环。
@@ -113,6 +130,25 @@ class ValueRouterStateManager {
     if (!sessionId) return
     if (this.intents.has(sessionId)) return
     this.intents.set(sessionId, intent)
+  }
+
+  /**
+   * 记录一次**实际改写**的线路——这是「插件到底干了什么」的唯一可观测出口。
+   *
+   * 为什么必须有：子代理会话头不带模型信息，`subagent` 工具的返回也不带，
+   * 所以主控和用户在对话里**无法验证**派发是否真的分散了（一次实测验收就因为
+   * 这个而「无法确认三个子代理是不是三个不同模型」）。改写时 provider/model
+   * 就在插件手上，必须把它显示出来，否则这个机制没法被验收。
+   */
+  recordDispatch(entry: DispatchRecord): void {
+    this.dispatches.push(entry)
+    // 有界环形：只留最近若干条，长跑进程不无限增长。
+    while (this.dispatches.length > MAX_DISPATCH_RECORDS) this.dispatches.shift()
+  }
+
+  /** 最近的实际派发记录，最新的在前。 */
+  recentDispatches(limit = 12): DispatchRecord[] {
+    return this.dispatches.slice(-limit).reverse()
   }
 
   intentFor(sessionId: string): ChildRouteIntent | undefined {
@@ -248,6 +284,7 @@ class ValueRouterStateManager {
     this.rotationSlots.clear()
     this.rotationCounters.clear()
     this.orphanRotationCounter = 0
+    this.dispatches.length = 0
     this.globalExecutorCalls = 0
   }
 }

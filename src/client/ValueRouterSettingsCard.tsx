@@ -105,7 +105,7 @@ function RotationStrip({ pool }: { pool: readonly ResolvedPoolLine[] }): React.R
           <span key={index} className={styles.rotationChip}>
             <span className={styles.rotationChipIndex}>{index + 1}</span>
             <span className={styles.rotationChipModel} title={`${line.provider} / ${line.model}`}>
-              {line.model}
+              {line.provider}/{line.model}
             </span>
           </span>
         )

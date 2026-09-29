@@ -882,6 +882,54 @@
   white-space: nowrap;
 }
 
+/* 派发记录：验收依据。子代理不带模型信息，这里是唯一能看到「实际跑了什么」的地方。 */
+.dispatchLog {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.07));
+}
+
+.dispatchLogHead {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  margin-bottom: 3px;
+}
+
+.dispatchRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.dispatchRoute {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dispatchProvider {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.dispatchOrigin {
+  flex: none;
+  min-width: 40px;
+  text-align: right;
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lineActions,
   .iconBtn,

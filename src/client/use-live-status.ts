@@ -37,6 +37,16 @@ export interface ValueRouterTierView {
   pool: ValueRouterPoolLineView[]
 }
 
+/** 一条实际派发记录的浏览器侧镜像。 */
+export interface ValueRouterDispatchView {
+  provider: string
+  model: string
+  /** 实际派发的档位下标；落在兜底线路时为 null。 */
+  tierIndex: number | null
+  origin: 'pool' | 'explicit' | 'fallback'
+  at: number
+}
+
 export interface ValueRouterStatusView {
   enabled: boolean
   strategy: ValueRouterStrategy
@@ -46,6 +56,7 @@ export interface ValueRouterStatusView {
   executorReason?: string
   executorCallsTotal: number
   tierRouting: 'tier-rotate' | 'controller'
+  recentDispatches: ValueRouterDispatchView[]
   allowlistKnown: boolean
 }
 
@@ -168,6 +179,20 @@ function asPoolLine(value: unknown): ValueRouterPoolLineView | undefined {
   }
 }
 
+/** 一条派发记录：字段缺失就丢弃这一条，不影响其余。 */
+function asDispatch(value: unknown): ValueRouterDispatchView[] {
+  if (typeof value !== 'object' || value === null) return []
+  const raw = value as Record<string, unknown>
+  if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return []
+  return [{
+    provider: raw.provider,
+    model: raw.model,
+    tierIndex: typeof raw.tierIndex === 'number' ? raw.tierIndex : null,
+    origin: raw.origin === 'explicit' || raw.origin === 'fallback' ? raw.origin : 'pool',
+    at: num(raw.at),
+  }]
+}
+
 /** 档位视图：逐项兜底，宿主送来半残数据时不至于整档消失。 */
 function asTier(value: unknown): ValueRouterTierView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
@@ -198,6 +223,9 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
     ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),
     executorCallsTotal: num(raw.executorCallsTotal),
     tierRouting: raw.tierRouting === 'controller' ? 'controller' : 'tier-rotate',
+    recentDispatches: Array.isArray(raw.recentDispatches)
+      ? raw.recentDispatches.flatMap(asDispatch)
+      : [],
     allowlistKnown: raw.allowlistKnown !== false,
   }
 }
