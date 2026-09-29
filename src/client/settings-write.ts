@@ -49,6 +49,24 @@ export function describeFormState(snapshot: {
   return `status=${snapshot.status} writable=${snapshot.writable} mode=${snapshot.mode} revision=${snapshot.revision ?? '-'}`
 }
 
+/**
+ * 宿主对写入路径的硬性要求（`dsh-settings/lib/index.js:507`）：
+ * **路径必须精确落在 volatile 字段上**，否则以
+ * `Config field "X" is not volatile` 拒写。
+ *
+ * 顶层标量与 `tiers`（整个数组 volatile）可以整值写；但 `executor` 本身**不是**
+ * volatile——它是普通对象，volatile 落在它的**子字段**上。写 `executor: {...}`
+ * 会被直接拒绝，必须按叶子路径逐个写：`executor.provider` / `executor.model` /
+ * `executor.reasoningEffort`。这不是风格问题，绕不过去。
+ */
+export function expandWritePaths(key: string, value: unknown): [string, unknown][] {
+  if (key !== 'executor' || typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return [[key, value]]
+  }
+  return Object.entries(value as Record<string, unknown>)
+    .map(([leaf, leafValue]): [string, unknown] => [`executor.${leaf}`, leafValue])
+}
+
 export function createValueRouterSettingsWriter(
   form: ValueRouterWritableSettingsScope,
   t: (key: ValueRouterLocaleKey) => string,
@@ -56,6 +74,7 @@ export function createValueRouterSettingsWriter(
   let tail: Promise<void> = Promise.resolve()
   return (patch) => {
     const entries = Object.entries(structuredClone(patch))
+      .flatMap(([key, value]) => expandWritePaths(key, value))
     const task = tail.then(async () => {
       for (const [key, value] of entries) {
         if (value === undefined) continue
@@ -69,7 +88,9 @@ export function createValueRouterSettingsWriter(
         // 继承值恰好相等并不能证明这次显式覆写被保存：必须由 user 原始层确认该字段。
         if (!acceptedByHost || accepted.status !== 'ready' || typeof user !== 'object' || user === null
           || !Object.hasOwn(user, key) || !sameSetting((user as Record<string, unknown>)[key], value)) {
-          throw new Error(t('settingsSaveFailed'))
+          throw new Error(
+            `${t('settingsSaveFailed')} [acceptedByHost=${acceptedByHost} status=${accepted.status} field=${key}]`,
+          )
         }
       }
     })
