@@ -27,6 +27,7 @@ import {
   strategyLabel,
 } from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
+import { describeFormState } from './settings-write.ts'
 import { useValueRouterConfig } from './useValueRouterConfig.ts'
 import { useLiveStatus } from './use-live-status.ts'
 import styles from './value-router.module.css'
@@ -240,6 +241,14 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
       </div>
 
       {saveError && <div className={a11y.error} role="alert">{saveError}</div>}
+
+      {/* 诊断：宿主把「设置文档没送到客户端」和「value-router 命名空间没被服务」
+          压成同一句错误文案，这里常驻显示真实状态，省得靠猜。status=ready 后自动消失。 */}
+      {configForm && configForm.getSnapshot().status !== 'ready' && (
+        <div className={styles.fieldHint} role="status" data-value-router-form-state="true">
+          宿主设置文档状态：{describeFormState(configForm.getSnapshot())}
+        </div>
+      )}
 
       {dock && !usable && (
         <div className={dockStyles.setupHint}>

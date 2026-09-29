@@ -32,6 +32,23 @@ function sameSetting(actual: unknown, expected: unknown): boolean {
     && entries.every(([key, value]) => sameSetting(actualRecord[key], value))
 }
 
+/**
+ * 写前诊断：把 form 快照的真实状态拼成一句可读的话。
+ *
+ * 为什么需要它：宿主把两种完全不同的失败压成同一个 `status !== 'ready'`——
+ * ① mirror 还没拿到 describe()（`status: 'loading'`，设置文档没送到客户端）；
+ * ② 命名空间确实没被服务（`status: 'unavailable'`，条目被宿主 describe() 跳过）。
+ * 只报「配置不可写」无法区分这两者，排查就只能靠猜。
+ */
+export function describeFormState(snapshot: {
+  status: string
+  writable: boolean
+  mode: string
+  revision?: number | undefined
+}): string {
+  return `status=${snapshot.status} writable=${snapshot.writable} mode=${snapshot.mode} revision=${snapshot.revision ?? '-'}`
+}
+
 export function createValueRouterSettingsWriter(
   form: ValueRouterWritableSettingsScope,
   t: (key: ValueRouterLocaleKey) => string,
@@ -43,7 +60,9 @@ export function createValueRouterSettingsWriter(
       for (const [key, value] of entries) {
         if (value === undefined) continue
         const before = form.getSnapshot()
-        if (before.status !== 'ready' || !before.writable) throw new Error(t('settingsNotWritable'))
+        if (before.status !== 'ready' || !before.writable) {
+          throw new Error(`${t('settingsNotWritable')} [${describeFormState(before)}]`)
+        }
         const acceptedByHost = await form.set(key, value)
         const accepted = form.getSnapshot()
         const user = accepted.user
