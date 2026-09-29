@@ -511,3 +511,320 @@
   background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.08));
   border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   调度台：档位卡片 + 线路行 + 轮转序列
+   设计意图：这块面板的真正主题是「子代理会被怎么派出去」，
+   所以结构按调度台组织——档位是队列，线路是队列里的成员，
+   轮转序列是唯一被强调的东西（.rotationStrip），其余一律安静。
+   ───────────────────────────────────────────────────────────────────────── */
+
+.tierList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tierCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.05));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.18));
+}
+
+/* 第 1 档是默认轮转池，用品牌色的左边框标记——不是装饰，是路由语义的提示 */
+.tierCardPrimary {
+  border-left: 3px solid var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  padding-left: 10px;
+}
+
+.tierHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.tierIndex {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.14));
+  color: var(--dsw-alias-label-secondary, #5b6472);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tierNameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tierNameInput:hover {
+  border-color: var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.25));
+}
+
+.tierNameInput:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  background: var(--dsw-alias-bg-layer-1, var(--dsh-surface-primary, #fff));
+}
+
+.tierTag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  background: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.08));
+}
+
+.tierActions {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.tierEmpty {
+  padding: 10px 0 2px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.lineList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lineRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  min-height: 28px;
+}
+
+.lineRow:hover {
+  background: var(--dsw-alias-bg-layer-3, rgba(127, 127, 127, 0.07));
+}
+
+.lineRowBlocked {
+  opacity: 0.55;
+}
+
+.lineName {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lineProvider {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.lineBlocked {
+  font-size: 10px;
+  color: var(--dsw-alias-state-warn-primary, #9a6700);
+}
+
+.lineActions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.lineRow:hover .lineActions,
+.lineRow:focus-within .lineActions {
+  opacity: 1;
+}
+
+/* 图标按钮：默认隐形，hover 行时才出现，避免整屏都是灰按钮 */
+.iconBtn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.iconBtn:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.16));
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+
+.iconBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.iconBtnDanger:hover:not(:disabled) {
+  color: var(--dsw-alias-state-danger-primary, #c0392b);
+}
+
+.linkBtn {
+  border: none;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  cursor: pointer;
+}
+
+.linkBtn:hover {
+  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.1));
+}
+
+.addLineBtn {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 4px 10px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.3));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #5b6472);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.addLineBtn:hover {
+  border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.06));
+}
+
+.addTierBtn {
+  align-self: flex-start;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.07));
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.addTierBtn:hover {
+  border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
+  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.07));
+}
+
+.sectionNote {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.emptyHint {
+  padding: 14px 12px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.28));
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #5b6472);
+}
+
+/* ── 签名元素：轮转序列条 ──────────────────────────────────────────────
+   整块面板存在的理由是「子代理会被怎么派」。把这个抽象的取模循环
+   画成一条看得见的序列，是这一版唯一刻意用力气的地方。 */
+
+.rotationStrip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(127, 127, 127, 0.05));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.18));
+}
+
+.rotationCaption {
+  flex: 1 0 100%;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  margin-bottom: 2px;
+}
+
+.rotationChip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.12));
+  font-size: 11px;
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+
+.rotationChipIndex {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.rotationChipModel {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lineActions,
+  .iconBtn,
+  .linkBtn,
+  .addLineBtn,
+  .addTierBtn,
+  .toggleSwitch,
+  .toggleKnob {
+    transition: none;
+  }
+}
