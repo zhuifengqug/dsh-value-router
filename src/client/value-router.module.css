@@ -525,6 +525,71 @@
   gap: 10px;
 }
 
+/* 分区标题：左边标题、右边计数——让用户一眼知道规模，不必展开 */
+.sectionHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sectionMeta {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 折叠箭头：独立按钮，不包住输入框（避免在 button 里嵌可交互元素） */
+.tierToggle {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  cursor: pointer;
+}
+
+.tierToggle:hover {
+  background: var(--dsw-alias-bg-layer-4, rgba(127, 127, 127, 0.16));
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+
+.chevron {
+  display: inline-block;
+  font-size: 15px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 0.15s;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+/* 折叠时用一行摘要代替模型列表 */
+.tierSummary {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tierWarn {
+  font-size: 11px;
+  color: var(--dsw-alias-state-warn-primary, #9a6700);
+  background: var(--dsw-alias-state-warn-surface, rgba(245, 158, 11, 0.1));
+  border-radius: 5px;
+  padding: 4px 8px;
+}
+
 .tierCard {
   display: flex;
   flex-direction: column;
@@ -823,6 +888,7 @@
   .linkBtn,
   .addLineBtn,
   .addTierBtn,
+  .chevron,
   .toggleSwitch,
   .toggleKnob {
     transition: none;

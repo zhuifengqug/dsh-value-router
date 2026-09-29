@@ -131,9 +131,27 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
   const [pickingFallback, setPickingFallback] = useState(false)
   const [pickingFor, setPickingFor] = useState<{ tier: number; line: number } | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
+  /**
+   * 收起的档位 id 集合。默认只展开第 1 档（真正会被轮转的那档），
+   * 其余折叠成一行摘要——档位多起来时全展开会淹没设置面板。
+   */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
   const liveStatus = useLiveStatus(clientCtx, true)
 
   const liveTiers = liveStatus?.tiers ?? tierList
+  const isCollapsed = (id: string, index: number): boolean =>
+    collapsed.size === 0 && index > 0 ? true : collapsed.has(id)
+  const toggleCollapsed = (id: string): void => {
+    setCollapsed((previous) => {
+      // 首次交互前用「index>0 即折叠」的隐式默认，显式切换后以用户选择为准。
+      const base = previous.size === 0
+        ? new Set(tierList.filter((_, index) => index > 0).map(tier => tier.id))
+        : new Set(previous)
+      if (base.has(id)) base.delete(id)
+      else base.add(id)
+      return base
+    })
+  }
 
   // —— 写入 ——
   const persist = useCallback((patch: Partial<ValueRouterConfig>): void => {
@@ -275,7 +293,10 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
       {/* —— 档位线路池：顺序即优先级，第一个 = 最低档 = 兜底轮转池 —— */}
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>子代理档位与线路池</div>
+        <div className={styles.sectionHead}>
+          <span className={styles.sectionTitle}>子代理档位与线路池</span>
+          <span className={styles.sectionMeta}>{tierList.length} 档 · {totalLines} 模型</span>
+        </div>
         {tierList.length === 0 ? (
           <div className={styles.emptyHint}>
             还没有档位。点下面的「添加档位」，给每档放上你想用的模型。
@@ -284,6 +305,8 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
           tierList.map((tier, tierIndex) => {
             const isLowest = tierIndex === 0
             const liveTier = liveTiers[tierIndex]
+            const folded = isCollapsed(tier.id, tierIndex)
+            const blockedCount = liveTier?.pool.filter(line => !line.allowed).length ?? 0
             return (
               <div
                 key={tier.id}
@@ -291,6 +314,15 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
                 data-value-router-tier={tier.id}
               >
                 <div className={styles.tierHead}>
+                  <button
+                    type="button"
+                    className={styles.tierToggle}
+                    aria-expanded={!folded}
+                    aria-label={`${folded ? '展开' : '收起'}第 ${tierIndex + 1} 档`}
+                    onClick={() => toggleCollapsed(tier.id)}
+                  >
+                    <span className={`${styles.chevron} ${folded ? '' : styles.chevronOpen}`} aria-hidden="true">›</span>
+                  </button>
                   <span className={styles.tierIndex} aria-hidden="true">{tierIndex + 1}</span>
                   <input
                     className={styles.tierNameInput}
@@ -300,9 +332,13 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
                     spellCheck={false}
                     onChange={(event) => patchTier(tierIndex, { label: event.target.value })}
                   />
-                  <span className={styles.tierTag}>
-                    {isLowest ? '默认轮转' : '按需命中'}
-                  </span>
+                  {folded ? (
+                    <span className={styles.tierSummary}>
+                      {tier.pool.length === 0 ? '空' : tier.pool.map(line => line.model).join(' · ')}
+                    </span>
+                  ) : (
+                    <span className={styles.tierTag}>{isLowest ? '默认轮转' : '按需命中'}</span>
+                  )}
                   <div className={styles.tierActions}>
                     <button
                       type="button"
@@ -326,6 +362,14 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
                     >✕</button>
                   </div>
                 </div>
+
+                {folded ? null : (
+                  <>
+                {blockedCount > 0 && (
+                  <div className={styles.tierWarn}>
+                    有 {blockedCount} 条线路不在宿主白名单里，不会被派发。
+                  </div>
+                )}
 
                 {tier.pool.length === 0 ? (
                   <div className={styles.tierEmpty}>这一档还没有模型</div>
@@ -387,6 +431,8 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
                 >
                   + 添加模型
                 </button>
+                  </>
+                )}
               </div>
             )
           })
