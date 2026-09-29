@@ -30,18 +30,36 @@ const ModelRouteSchema = z.object({
   reasoningEffort: z.string().default('').volatile(),
 })
 
-/** 轮转池内单条线路 schema。**不设条数上限**——订阅分散在多家 provider 是常态。 */
+/**
+ * 轮转池内单条线路 schema。
+ *
+ * **这里刻意不加 `.volatile()`**：volatile 只能落在「固定对象路径且没有外层 volatile」的
+ * 位置上（cordis 的 `resolveConfig` 会拒绝嵌套 volatile）。线路位于 `tiers.*` 之下，
+ * 而 `tiers` 整体已经是 volatile——给内层再标 volatile 会让 Loader **拒绝整份配置**：
+ *
+ *     ValidationError: invalid config:
+ *       - $.tiers.*.id volatile fields require a fixed object path
+ *         without an enclosing volatile field (at tiers.*.id)
+ *     dsh: warning: 1 entry did not activate
+ *
+ * 条目不激活 → fiber 不存在 → `describe()` 跳过它 → 客户端 `status=unavailable` →
+ * 「设置里没有卡片」+「当前配置不可写」。宿主侧 `volatileForm()` 本来就是按
+ * 「volatile 字段整体作为一片子树」处理的，所以外层 volatile 已经覆盖了整棵 tiers。
+ *
+ * 同一个错误在 0.2.x 的扁平 `pool`（volatile 数组 + volatile 元素）上就存在过——
+ * 也就是说「设置不可写」从头到尾是**同一个根因**，前几轮改的都是表层。
+ */
 const PoolLineSchema = z.object({
-  provider: z.string().default('').volatile(),
-  model: z.string().default('').volatile(),
-  reasoningEffort: z.string().default('').volatile(),
+  provider: z.string().default(''),
+  model: z.string().default(''),
+  reasoningEffort: z.string().default(''),
 })
 
-/** 档位 schema。id/label 由 resolveTier 补齐，池内无上限。 */
+/** 档位 schema。id/label 由 resolveTier 补齐，池内无上限。内部同样不能标 volatile。 */
 const TierSchema = z.object({
-  id: z.string().default('').volatile(),
-  label: z.string().default('').volatile(),
-  pool: z.array(PoolLineSchema).default([]).volatile(),
+  id: z.string().default(''),
+  label: z.string().default(''),
+  pool: z.array(PoolLineSchema).default([]),
 })
 
 export const Config = z.object({

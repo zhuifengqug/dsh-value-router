@@ -17,6 +17,8 @@
  * 注意：不要 `export default apply`（loader unwrapExports 会丢弃模块级 inject）。
  */
 
+import { appendFileSync } from 'node:fs'
+
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -191,6 +193,44 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   ctx.effect(() => settingsSection ?? (() => undefined), 'value-router: settings surface')
 
   /**
+   * 启动时把宿主 `settings.describe()` 的真实结果打进日志。
+   *
+   * 为什么需要：客户端只能看到 `status=unavailable`——**宿主把「命名空间没进
+   * describe()」和「连接没建立」压成同一个信号**，而这两者的排查方向完全相反。
+   * describe() 内部有多个早退闸门（schema 缺失 / fiber 未激活 / volatile 过滤后为空），
+   * 从编译产物里读代码推断已经连错两次；这里直接问宿主本身。
+   */
+  function reportSettingsSurface(): void {
+    const probe = (phase: string): void => {
+      let line: string
+      try {
+        const settings = ctx.settings as { describe?: () => readonly { ns?: unknown }[] } | undefined
+        const rows = settings?.describe?.()
+        if (rows === undefined) {
+          line = `${phase}：describe() 不可用`
+        } else {
+          const namespaces = rows.map(row => String(row.ns)).sort()
+          const present = namespaces.includes(VALUE_ROUTER_SETTINGS_NAMESPACE)
+          line = `${phase}：${namespaces.length} 个命名空间；本插件 ${present ? '**在列**' : '**不在列**'}；全量=${namespaces.join(',') || '(空)'}`
+        }
+      } catch (error) {
+        line = `${phase}：describe() 抛错：${error instanceof Error ? error.message : String(error)}`
+      }
+      info(`value-router: 诊断——${line}`)
+      const sink = process.env.VALUE_ROUTER_DIAG_SINK
+      if (sink === undefined || sink === '') return
+      try {
+        appendFileSync(sink, `[${new Date().toISOString()}] ${line}\n`, 'utf8')
+      } catch { /* 诊断失败不影响插件 */ }
+    }
+
+    probe('apply() 同步')
+    // apply() 期间组合尚未定稿，此刻的 describe() 不代表稳态；延后再问一次。
+    const timer = setTimeout(() => probe('+3s 稳态'), 3_000)
+    ;(timer as unknown as { unref?: () => void }).unref?.()
+  }
+
+  /**
    * 取出本插件在 Loader 里的配置条目。
    *
    * 优先用 configEditor.entries()（带 profile patch 层），退化为遍历 loader.entries()。
@@ -254,6 +294,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       info(
         `value-router: settings 命名空间 "${VALUE_ROUTER_SETTINGS_NAMESPACE}" 就绪（settings.configure，条目 id 即 namespace）`,
       )
+      reportSettingsSurface()
       return buildSettingsEntryWatcher()
     } catch (error) {
       warn(

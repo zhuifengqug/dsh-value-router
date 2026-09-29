@@ -5,6 +5,47 @@
 
 ---
 
+## 0.5.2 — 2026-09-29
+
+**「设置里没有卡片 + 配置不可写」的最终根因**。从 0.2.0 起就存在，此前三轮都在修表层。
+
+### Fixed（阻断性）
+
+- **嵌套 volatile 让整个 Loader 条目不激活。** `tiers` 是 volatile 数组，元素里又标了
+  volatile 字段，cordis 的 `resolveConfig` 直接拒绝：
+
+  ```
+  value-router (@gjs27/dsh-value-router): ValidationError: invalid config:
+    - $.tiers.*.id volatile fields require a fixed object path
+      without an enclosing volatile field (at tiers.*.id)
+  dsh: warning: 1 entry did not activate
+  ```
+
+  条目不激活 → fiber 不存在 → `describe()` 在 `:417` 跳过 → 客户端
+  `status=unavailable` → 「配置不可写，请等待运行时连接恢复后重试」。
+  0.2.x 的扁平 `pool`（volatile 数组 + volatile 元素）**是同一个错误**。
+
+  修法：volatile 只落在最外层固定路径——`tiers` 整体 volatile，其内部
+  （`TierSchema` / `PoolLineSchema`）不再标 volatile。宿主 `volatileForm()` 本来就是
+  按「volatile 字段整体作为一片子树」处理的，外层 volatile 已覆盖整棵 `tiers`。
+  `test/schema.test.ts` 增加断言：`tiers` 的直接子字段**不得**带 `meta.volatile`。
+
+  / **Nested volatile fields made the whole Loader entry fail to activate.** The same
+  error existed in 0.2.x's flat `pool`. Fixed by keeping volatile only on the outermost
+  fixed path.
+
+### Added
+
+- 客户端把宿主设置文档的真实状态暴露到 UI（写入被拒时附带
+  `status/writable/mode/revision`，并在卡片上常驻显示）。宿主原本把
+  「命名空间没进 describe()」和「连接没建立」压成同一句话，而两者的排查方向相反——
+  这个盲区让前两轮修复都在猜。
+- 宿主启动时打印 `describe()` 命名空间清单（并可用 `VALUE_ROUTER_DIAG_SINK` 环境变量
+  落盘），用于直接向宿主取证而不是读编译产物推断。
+  / **Client-side and host-side diagnostics** for the settings surface.
+
+---
+
 ## 0.5.1 — 2026-09-29
 
 **修真正的根因**（0.4.0 / 0.5.0 的同类症状此前只修到一半），并按用户要求把设置面板
@@ -267,6 +308,22 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.5.2 — 2026-09-29
+
+**The real root cause** of "no settings card / configuration not writable", present
+since 0.2.0; the previous three attempts fixed symptoms.
+
+Nested volatile fields made the Loader entry fail to activate with
+`ValidationError: $.tiers.*.id volatile fields require a fixed object path without an
+enclosing volatile field`, followed by `1 entry did not activate`. The 0.2.x flat
+`pool` had the identical defect. Fixed by keeping `volatile` only on the outermost
+fixed path — the host's `volatileForm()` already treats a volatile field as covering
+its whole subtree. Verified by booting the web profile: `describe()` now lists
+`value-router`.
+
+**Added:** client- and host-side diagnostics for the settings surface, so future
+failures are observed rather than inferred.
 
 ## 0.5.1 — 2026-09-29
 

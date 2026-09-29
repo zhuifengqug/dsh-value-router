@@ -56,22 +56,32 @@ test('回归：Config 的每个字段都必须标记 volatile，否则命名空�
   }
 })
 
-test('兜底线路、档位与池内线路的子字段也都必须是 volatile', () => {
+test('volatile 的分布：外层整体 volatile，内层绝不再标 volatile', () => {
   const fields = (Config as unknown as { dict: Record<string, unknown> }).dict
   const executor = fields.executor as { type?: string; dict: Record<string, unknown> }
   // schemastery 的数组节点用 `inner` 持有元素 schema（不是 zod 的 `item`）
   const tiersArray = fields.tiers as {
     type?: string
     meta?: { volatile?: boolean }
-    inner?: { type?: string; dict: Record<string, unknown> }
+    inner?: { type?: string; dict: Record<string, { meta?: { volatile?: boolean } }> }
   }
+  const tierNode = tiersArray.inner as { dict: Record<string, { meta?: { volatile?: boolean } }> }
 
-  assert.equal(volatileFormFieldCount(executor), 3, 'provider/model/reasoningEffort 三项都要在')
+  assert.equal(volatileFormFieldCount(executor), 3, 'executor 的三项在固定路径下，可以各自 volatile')
   assert.equal(tiersArray.type, 'array')
-  assert.equal(tiersArray.meta?.volatile, true, 'tiers 本身必须是 volatile，否则整个档位设置项不出现')
-  assert.ok(tiersArray.inner, '数组节点应持有元素 schema')
-  assert.equal(volatileFormFieldCount(tiersArray.inner), 3, '档位的 id/label/pool 三项都要在')
-  // 档位的 pool 是嵌套数组，内层三条线路字段也必须 volatile
-  const tierNode = tiersArray.inner as { dict: Record<string, { inner?: unknown }> }
-  assert.equal(volatileFormFieldCount(tierNode.dict.pool?.inner), 3, '线路的 provider/model/reasoningEffort 三项都要在')
+  assert.equal(tiersArray.meta?.volatile, true, 'tiers 整体 volatile，覆盖整棵子树')
+
+  // 关键回归：tiers 内部**不得**再有 volatile。cordis 的 resolveConfig 会拒绝
+  // 「固定路径 + 外层已 volatile」的嵌套，直接让整个 Loader 条目不激活：
+  //   dsh: warning: 1 entry did not activate
+  //   → describe() 跳过 → 客户端 status=unavailable → 配置不可写
+  for (const [key, child] of Object.entries(tierNode.dict)) {
+    assert.notEqual(
+      child.meta?.volatile,
+      true,
+      `tiers.*.${key} 不能标 volatile：它嵌在已经 volatile 的 tiers 之下，会让条目不激活`,
+    )
+  }
+  // 外层 volatile 已覆盖子树，宿主的 volatileForm 仍认得它
+  assert.equal(volatileFormFieldCount(tiersArray), 1)
 })
