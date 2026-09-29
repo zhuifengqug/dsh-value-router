@@ -236,8 +236,12 @@ export function apply(ctx: ClientContext): void {
   )
 
   // 「设置 → 插件 → 插件配置」按设置 namespace 派发卡片：只有 `key` 命中宿主已服务
-  // namespace 的 settings.plugin.item 条目才会渲染，与宿主 installSection 注册的
-  // `value-router` 段配对。
+  // namespace 的 settings.plugin.item 条目才会渲染。
+  //
+  // 宿主侧不再注册命名空间（DSH 0.1.7-rc.2 已删除 installSection/register）：设置页
+  // schema 由宿主从模块导出的 Config 推导（dsh-settings 的 SettingsForms.schema(entry)
+  // 读 entry.fiber.runtime.Config），ns 即 Loader 条目 id；本插件的条目 id 恰好就是
+  // VALUE_ROUTER_SETTINGS_NAMESPACE，所以这里的 key 与宿主生成的表单天然配对。
   ctx.slots.inject('settings.plugin.item', () =>
     ctx.slots.register(
       {

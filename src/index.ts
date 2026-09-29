@@ -48,7 +48,16 @@ import { dshHome } from './dsh-home.ts'
 import { syncPresetTrees } from './sync.ts'
 
 export const name = 'value-router'
-export const inject = ['systemPrompt', 'settings', 'llm']
+export const inject = ['systemPrompt', 'settings', 'llm', 'configEditor']
+
+/**
+ * 本插件在 Loader 里的配置条目（只依赖用到的字段）。
+ *
+ * `@deepseek-ai/cordis-plugin-loader` 不在本包依赖里，用结构化类型代替 import。
+ */
+interface SettingsConfigEntry {
+  options?: { id?: string; config?: unknown }
+}
 
 export * from './core/config.ts'
 export * from './core/policy.ts'
@@ -155,21 +164,135 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     }))
   }
 
-  // —— 设置：注册命名空间（自动生成 GUI 开关），并同步 currentConfig ——
-  ctx.settings.installSection(ctx, VALUE_ROUTER_SETTINGS_NAMESPACE, Config, currentConfig, {
-    setSource: (source) => {
-      currentSource = source
-      currentConfig = resolveConfig(source())
-      void refreshExecutorHealth()
-    },
-    onChange: () => {
-      currentConfig = resolveConfig(currentSource())
-      void refreshExecutorHealth()
-    },
-    validate: (value) => {
-      assertConfigValid(value)
-    },
-  })
+  /** 结构化日志（与 status-controller 一致：缺失/抛错都不影响路由）。 */
+  const warn = (message: string): void => {
+    try {
+      ctx.logger?.warn?.(message)
+    } catch { /* ignore */ }
+  }
+  const info = (message: string): void => {
+    try {
+      ctx.logger?.info?.(message)
+    } catch { /* ignore */ }
+  }
+
+  // —— 设置：DSH 0.1.7-rc.2 起 installSection() 已移除 ——
+  //
+  // 旧版本靠 installSection(ctx, ns, Config, value, { setSource, onChange, validate })
+  // 注册命名空间并拿到一个「随配置热更新」的 source。rc.2 把配置编辑权收归
+  // ctx.configEditor（profile patch 文件 + Loader 热重载），SettingsForms 只负责
+  // 表单（configure/describe/update/replace/mutate）：
+  //   - 表单本身：宿主从 Loader runtime 读模块导出的 Config（dsh-settings 的
+  //     SettingsForms.schema(entry) => entry.fiber.runtime.Config），因此这里
+  //     不需要（也没有 API）再注册一次 schema；命名空间仍是 Loader 条目 id，
+  //     即 VALUE_ROUTER_SETTINGS_NAMESPACE，与客户端 SettingsScope 一致。
+  //   - 配置值：编辑落盘后 Loader 会重建条目、以新 config 重新调用 apply()，
+  //     所以「记住本条目」再按需读回，就能在每次 apply 后拿到最新值。
+  // 任何一步不可用都只降级（保留 entry config 解析 + 一条 warning），不抛错。
+  let settingsEntry = findOwnConfigEntry()
+  const settingsSection = registerSettingsSection()
+  ctx.effect(() => settingsSection ?? (() => undefined), 'value-router: settings surface')
+
+  /**
+   * 取出本插件在 Loader 里的配置条目。
+   *
+   * 优先用 configEditor.entries()（带 profile patch 层），退化为遍历 loader.entries()。
+   * 找不到就返回 undefined——apply() 仍然依赖传入的 initialConfig 正常工作。
+   */
+  function findOwnConfigEntry(): SettingsConfigEntry | undefined {
+    try {
+      const editor = ctx.get('configEditor' as never) as
+        | { entries?: () => readonly SettingsConfigEntry[] }
+        | undefined
+      const rows = editor?.entries?.()
+      if (Array.isArray(rows)) {
+        const own = rows.find((row) => row?.options?.id === VALUE_ROUTER_SETTINGS_NAMESPACE)
+        if (own !== undefined) return own
+      }
+    } catch { /* configEditor 缺失/未就绪 → 回落到 loader */ }
+    try {
+      const loader = ctx.get('loader' as never) as { entries?: () => Iterable<SettingsConfigEntry> } | undefined
+      for (const row of loader?.entries?.() ?? []) {
+        if (row?.options?.id === VALUE_ROUTER_SETTINGS_NAMESPACE) return row
+      }
+    } catch { /* loader 不可用 → 保持 initialConfig 解析 */ }
+    return undefined
+  }
+
+  /**
+   * 把 currentSource 指向 Loader 条目上的实时配置。
+   *
+   * 一次 apply 期间条目 config 不变，所以只在启动时和「条目被热替换后」重绑；
+   * 绑定时同步 currentConfig 与 executor 健康，等价于旧的 onChange()。
+   */
+  function bindConfigFromEntry(): void {
+    const entry = settingsEntry
+    if (entry === undefined) return
+    currentSource = () => (entry.options?.config ?? {}) as Partial<ValueRouterConfig>
+    currentConfig = resolveConfig(currentSource())
+    void refreshExecutorHealth()
+  }
+
+  /**
+   * 注册设置页策略并建立「外部写入 → 重算 currentConfig」的监听。
+   *
+   * SettingsForms.configure() 只声明表单策略、不接收配置回调，因此这里在
+   * configure 之后按需自建监听：宿主写入（configEditor.edit → Loader 热重载）
+   * 会替换条目，此时重新绑定 source 并刷新 executor 健康。
+   */
+  function registerSettingsSection(): (() => void) | undefined {
+    try {
+      const settings = ctx.settings as {
+        configure?: (presentation: { auto?: boolean }, owner?: unknown) => unknown
+        describe?: () => readonly { ns?: unknown }[]
+      } | undefined
+      if (settings === undefined || typeof settings.configure !== 'function') {
+        warn('value-router: ctx.settings.configure 不可用；设置页降级为 Loader 条目配置。')
+        return undefined
+      }
+      bindConfigFromEntry()
+      // auto: true 与宿主默认一致，显式写出以声明「本条目由宿主自动生成表单」；
+      // 客户端 settings.plugin.item 卡片按同一 namespace 挂载。
+      settings.configure({ auto: true }, ctx.fiber)
+      info(
+        `value-router: settings 命名空间 "${VALUE_ROUTER_SETTINGS_NAMESPACE}" 就绪（settings.configure，条目 id 即 namespace）`,
+      )
+      return buildSettingsEntryWatcher()
+    } catch (error) {
+      warn(
+        `value-router: 设置页注册失败（${error instanceof Error ? error.message : String(error)}）；降级为 Loader 条目配置。`,
+      )
+      return undefined
+    }
+  }
+
+  /**
+   * 自建「条目热替换 → 重绑 source」监听：configEditor 没有变更事件，
+   * 只能只读轮询（与 executor 健康探活同样 30s 一次，不写任何文件）。
+   *
+   * 返回 dispose：取消轮询并回到 initialConfig，交给调用方注册进 ctx.effect。
+   */
+  function buildSettingsEntryWatcher(): () => void {
+    const timer = setInterval(() => {
+      const next = findOwnConfigEntry()
+      if (next !== undefined && next !== settingsEntry) {
+        settingsEntry = next
+        bindConfigFromEntry()
+      }
+    }, EXECUTOR_HEALTH_REFRESH_MS)
+    ;(timer as unknown as { unref?: () => void }).unref?.()
+    return () => {
+      clearInterval(timer)
+      resetConfigSource()
+    }
+  }
+
+  /** 取消条目绑定，回到 apply() 收到的 initialConfig。 */
+  function resetConfigSource(): void {
+    currentSource = () => initialConfig
+    currentConfig = resolveConfig(initialConfig)
+    void refreshExecutorHealth()
+  }
 
   // —— 系统提示段（order 145）：scope 门控内、生效配置启用时注入 ——
   ctx.systemPrompt.section({

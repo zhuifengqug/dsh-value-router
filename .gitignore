@@ -12,3 +12,6 @@ Thumbs.db
 
 # mnemon 运行时状态（插件在本目录生成）
 .mnemon/
+
+# 2026-09-29 修复前保留的残缺 git 仓库（仅 objects/，历史已抢救回 master）
+.git.broken-20260929/

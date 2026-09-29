@@ -5,7 +5,7 @@
  * 才能调度 Remote 服务。本文件是唯一的事实源：客户端 descriptor 的
  * typeSymbol 必须与这里定义的字符串逐字一致。
  *
- * loader 校验：codec.schema 必须是真 Zod v4 实例（带 _zod 标记）。
+ * loader 校验：strict codec 必须暴露 create()，且 create() 返回真 Zod v4 实例（带 _zod 标记）。
  *
  * 方法（declaration order = wire order，需与 status-controller.ts 的
  * markRemote 顺序一致）：
@@ -74,7 +74,16 @@ const setSessionOverrideResultSchema = z.object({
 
 // —— descriptor 构造 ——
 
-function invocation(id: string, method: string, parameterSchema: z.ZodTypeAny, resultSchema: z.ZodTypeAny) {
+/**
+ * strict codec 的 `create` 要求「按需物化」schema：这里包一层惰性工厂，
+ * 首次过边界时才真正构建，避免模块加载期就实例化全部 schema。
+ */
+function memoizeSchema(build: () => z.ZodTypeAny): () => z.ZodTypeAny {
+  let cached: z.ZodTypeAny | undefined
+  return () => (cached ??= build())
+}
+
+function invocation(id: string, method: string, parameterSchema: () => z.ZodTypeAny, resultSchema: () => z.ZodTypeAny) {
   return {
     id: `${PKG}#valueRouterStatus/${method}`,
     service: 'valueRouterStatus',
@@ -88,13 +97,13 @@ function invocation(id: string, method: string, parameterSchema: z.ZodTypeAny, r
       codec: {
         mode: 'strict',
         typeSymbol: `${TYPES}#${id}`,
-        schema: parameterSchema,
+        create: parameterSchema,
       },
     }],
     result: {
       mode: 'strict',
       typeSymbol: `${TYPES}#ValueRouterStatus${method[0]?.toUpperCase()}${method.slice(1)}Result`,
-      schema: resultSchema,
+      create: resultSchema,
     },
   }
 }
@@ -104,9 +113,9 @@ export const TYPERT = {
   face: 'host',
   schemas: [],
   invocations: [
-    invocation('StatusInput', 'status', statusInput, statusResultSchema),
-    invocation('SessionMetricsInput', 'sessionMetrics', sessionMetricsInput, sessionMetricsSchema),
-    invocation('SetSessionOverrideInput', 'setSessionOverride', setSessionOverrideInput, setSessionOverrideResultSchema),
+    invocation('StatusInput', 'status', memoizeSchema(() => statusInput), memoizeSchema(() => statusResultSchema)),
+    invocation('SessionMetricsInput', 'sessionMetrics', memoizeSchema(() => sessionMetricsInput), memoizeSchema(() => sessionMetricsSchema)),
+    invocation('SetSessionOverrideInput', 'setSessionOverride', memoizeSchema(() => setSessionOverrideInput), memoizeSchema(() => setSessionOverrideResultSchema)),
   ],
   model: { services: [], events: [], objects: [] },
 }
