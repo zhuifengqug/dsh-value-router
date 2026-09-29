@@ -76,11 +76,28 @@ export interface ValueRouterRemoteFace {
 
 // —— descriptor（id 与 typeSymbol 与宿主 src/typert.ts 对齐） ——
 
+/**
+ * 客户端贡献的 strict codec 形状。
+ *
+ * **必须是 `create` 工厂，不能是 `schema` 对象**——宿主的 `requireStrictCodec`
+ * （dsh-typert-loader/lib/index.js:206-211）检查的是 `typeof codec.create === 'function'`。
+ * 0.2.x 这里写的是旧的 `{ mode, typeSymbol, schema }`，后果是 `remote.$mount()`
+ * 对这份不合规的贡献**既不 resolve 也不 reject**——客户端于是永远停在
+ * 「正在连接宿主状态通道…」，界面上什么线索都没有。
+ *
+ * 同一个错误在宿主清单（src/typert.ts）和测试里都犯过、也都被单独修掉了，
+ * 唯独这一处漏了。三处必须一起改。
+ */
 function descriptor(method: string, inputSymbol: string, resultSymbol: string) {
   const passthrough = (typeSymbol: string) => ({
-    mode: 'strict',
+    mode: 'strict' as const,
     typeSymbol,
-    schema: { parse: (value: unknown) => value },
+    // 按需物化的直通 schema：宿主只要求 create 是函数，这里不做真实校验
+    // （真正的 strict 校验在宿主侧用 src/typert.ts 里那份真 schema 做）。
+    create: () => ({
+      parse: (value: unknown) => value,
+      safeParse: (value: unknown) => ({ success: true as const, data: value }),
+    }),
   })
   return {
     id: `${REMOTE_PACKAGE}#${REMOTE_SERVICE}/${method}`,
@@ -111,6 +128,12 @@ export const REMOTE_CONTRIBUTION = {
 
 const mountCache = new WeakMap<object, Promise<ValueRouterRemoteFace | undefined>>()
 
+/**
+ * $mount 的挂起上限。宿主对不合规的贡献可能既不 resolve 也不 reject
+ * （见上面 descriptor 的注释），没有上限的话界面会永远停在「正在连接」。
+ */
+const MOUNT_TIMEOUT_MS = 8_000
+
 function mountRemote(ctx: Context): Promise<ValueRouterRemoteFace | undefined> {
   const key = ctx as unknown as object
   const cached = mountCache.get(key)
@@ -119,7 +142,16 @@ function mountRemote(ctx: Context): Promise<ValueRouterRemoteFace | undefined> {
     try {
       const remote = ctx.remote as unknown as { $mount?: (contribution: unknown) => Promise<unknown> }
       if (typeof remote.$mount !== 'function') return undefined
-      await remote.$mount(REMOTE_CONTRIBUTION)
+      await Promise.race([
+        remote.$mount(REMOTE_CONTRIBUTION),
+        new Promise((_, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error(`$mount 超过 ${MOUNT_TIMEOUT_MS / 1000}s 未返回（贡献可能被宿主拒绝且不报错）`)),
+            MOUNT_TIMEOUT_MS,
+          )
+          ;(timer as unknown as { unref?: () => void }).unref?.()
+        }),
+      ])
       const mounted = (ctx as unknown as { reflect?: { get?: (key: string) => unknown } })
         .reflect?.get?.(`remote.${REMOTE_SERVICE}`) as ValueRouterRemoteFace | undefined
       if (mounted && typeof mounted.status === 'function') return mounted

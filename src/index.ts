@@ -41,6 +41,7 @@ import {
 } from './core/config.ts'
 import { Config } from './core/schema.ts'
 import { buildSystemPromptGuidance, VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER } from './core/policy.ts'
+import { TYPERT } from './typert.ts'
 import { checkRouteAvailability, type ExecutorHealth } from './core/model-selection.ts'
 import { decideSubagentRoute, isSubagentSession, pickTargetRoute, routeSkipText } from './core/routing.ts'
 import { emitValueRouterRuntimeTelemetry, routeErrorType, routeParameters, type RouteParameters } from './core/runtime-telemetry.ts'
@@ -226,8 +227,30 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
 
     probe('apply() 同步')
     // apply() 期间组合尚未定稿，此刻的 describe() 不代表稳态；延后再问一次。
-    const timer = setTimeout(() => probe('+3s 稳态'), 3_000)
+    const timer = setTimeout(() => {
+      probe('+3s 稳态')
+      reportStatusChannel()
+    }, 3_000)
     ;(timer as unknown as { unref?: () => void }).unref?.()
+  }
+
+  /**
+   * 临时旁路：报告**状态通道**（Typert Remote）的挂载结果。
+   *
+   * 客户端的派发记录一直停在「正在连接宿主状态通道…」，而客户端把 $mount 的失败
+   * 全部吞掉，界面上什么都看不出来。宿主这一侧能直接回答：服务有没有提供、
+   * typert 通道在不在、TYPERT 清单有没有被登记。
+   */
+  function reportStatusChannel(): void {
+    const sink = process.env.VALUE_ROUTER_DIAG_SINK
+    const say = (line: string): void => {
+      info(`value-router: 状态通道诊断——${line}`)
+      if (sink === undefined || sink === '') return
+      try { appendFileSync(sink, `[${new Date().toISOString()}] 状态通道 ${line}\n`, 'utf8') } catch { /* ignore */ }
+    }
+    say(`valueRouter 服务：${ctx.get('valueRouter' as never) !== undefined ? '已提供' : '缺失'}`)
+    say(`typert 服务：${ctx.get('typert' as never) !== undefined ? '存在' : '缺失'}`)
+    say(`TYPERT 清单：invocations=${TYPERT.invocations.length} package=${TYPERT.package}`)
   }
 
 
