@@ -5,6 +5,37 @@
 
 ---
 
+## 0.5.1 — 2026-09-29
+
+**修真正的根因**（0.4.0 / 0.5.0 的同类症状此前只修到一半），并按用户要求把设置面板
+**提到设置左侧栏的独立分区**。
+
+### Fixed（阻断性）
+
+- **`src/index.ts` 从未 re-export `Config`——这才是「设置里没有卡片 + 配置不可写」的真根因。**
+  宿主 `dsh-settings/lib/index.js:538-541` 读的是 `entry.fiber?.runtime?.Config`，
+  而 `entry.fiber.runtime` 就是本包**主入口模块**的导出对象。少这一行 → 宿主拿到
+  `undefined` → `describe()` 在 `:417` 跳过整个条目 → 命名空间不被服务。
+  / **The entry module never re-exported `Config`.** The host reads
+  `entry.fiber.runtime.Config` — the *entry module's* exports — so the whole settings
+  module was invisible to it.
+  修法：`export { Config } from './core/schema.ts'`。
+  `test/schema.test.ts` 现在**从 entry 模块**断言，不再直接 import `core/schema.ts`
+  ——上一版测对了规则、测错了位置，等于没测。
+- 补 `@deepseek-ai/cosmokit` 为 peer + dev 依赖：移除 `z<ValueRouterConfig>` 标注后，
+  `Config` 的推断类型含 `Volatile<T>`，缺这个依赖时生成 `.d.ts` 会报 TS2742
+  （`rolldown-plugin-dts`），**构建直接失败**。
+
+### Added
+
+- **设置左侧栏独立分区**（`settings.section`，`id: value-router`，`order: 40`，
+  标题随 locale 本地化）。此前只挂在「插件」区的按-namespace 卡片上，用户找不到。
+  两处入口现在指向同一份配置。
+  / **A dedicated Settings sidebar section**, as the user asked, alongside the
+  existing per-namespace card. Both entries read and write the same configuration.
+
+---
+
 ## 0.5.0 — 2026-09-29
 
 **主控判难度 → 定档 → 档内轮转。** 这是用户想要的最终形态。
@@ -236,6 +267,18 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.5.1 — 2026-09-29
+
+**Fixed (blocking, the real root cause):** `src/index.ts` never re-exported `Config`.
+The host reads `entry.fiber.runtime.Config` — the *entry module's* exports — so the
+whole settings module was invisible and the namespace was never served. The previous
+fix (adding `.volatile()`) was real but incomplete; both produce the identical symptom.
+`test/schema.test.ts` now asserts from the entry module rather than importing
+`core/schema.ts` directly. Also added `@deepseek-ai/cosmokit` as a peer + dev
+dependency, without which `.d.ts` generation fails with TS2742.
+
+**Added:** a dedicated Settings sidebar section (`settings.section`), as requested.
 
 ## 0.5.0 — 2026-09-29
 

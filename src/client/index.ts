@@ -18,6 +18,7 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -29,6 +30,7 @@ import { VALUE_ROUTER_SETTINGS_NAMESPACE } from '../core/config.ts'
 import { zh, en, type ValueRouterLocaleKey } from './locales.ts'
 import { ValueRouterSettingsCard } from './ValueRouterSettingsCard.tsx'
 import { ValueRouterHeaderStatus } from './ValueRouterHeaderStatus.tsx'
+import type { ValueRouterModelCatalog } from './ModelPicker.tsx'
 import { reportValueRouterTelemetry } from './telemetry.ts'
 import { createModelCatalogLoader } from './model-catalog.ts'
 import { createValueRouterSettingsWriter } from './settings-write.ts'
@@ -46,11 +48,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 
   interface SlotMap {
     'settings.plugin.item': { kind: 'keyed'; scope: 'root'; owner: SettingsPluginItemOwnerProps }
+    'settings.section': { kind: 'list'; scope: 'root'; owner: SettingsSectionOwnerProps }
   }
 }
 
 export interface SettingsPluginItemOwnerProps {
   children?: never
+}
+
+/** `settings.section` 由宿主 shell 拥有可见性与导航，只给一个 close 供离开设置用。 */
+export interface SettingsSectionOwnerProps {
+  close: () => void
 }
 
 export const inject = ['slots', 'locale', 'connection', 'configForms', 'remote', 'remote.session']
@@ -63,24 +71,48 @@ export function apply(ctx: ClientContext): void {
   const configForms = ctx.configForms
   const form = configForms.get<ValueRouterConfig>(VALUE_ROUTER_SETTINGS_NAMESPACE)
 
-  const fetchModels = createModelCatalogLoader(ctx, ctx.locale.bind('value-router'))
-  const onChange = createValueRouterSettingsWriter(form, ctx.locale.bind('value-router'))
+  const translate = ctx.locale.bind('value-router')
+  const fetchModels = createModelCatalogLoader(ctx, translate)
+  const onChange = createValueRouterSettingsWriter(form, translate)
 
-  // 「设置 → 插件 → 插件配置」按设置 namespace 派发卡片：只有 `key` 命中宿主已服务
-  // namespace 的 settings.plugin.item 条目才会渲染。
+  const settingsProps = (): {
+    config: ValueRouterConfig
+    configForm: ConfigForm<ValueRouterConfig>
+    onChange: (patch: Partial<ValueRouterConfig>) => Promise<void>
+    fetchModels: () => Promise<ValueRouterModelCatalog>
+    clientCtx: ClientContext
+  } => ({
+    config: form.getSnapshot().value ?? {} as ValueRouterConfig,
+    configForm: form,
+    onChange,
+    fetchModels,
+    clientCtx: ctx,
+  })
+
+  // 设置左侧栏里的**独立分区**（用户要求单拎出来，而不是塞在别的插件页里）。
+  // `settings.section` 是 list 型槽位，label 由本插件自己本地化；
+  // 宿主在语言切换时会重注册槽位，这里直接取当前语言的译文即可。
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.section',
+        id: VALUE_ROUTER_SETTINGS_NAMESPACE,
+        order: 40,
+        label: translate('sectionLabel'),
+        inject: settingsProps,
+      },
+      ValueRouterSettingsCard,
+    ),
+  )
+
+  // 同时仍挂在「插件」区的按-namespace 卡片上，两处入口指向同一份配置。
   ctx.slots.inject('settings.plugin.item', () =>
     ctx.slots.register(
       {
         name: 'settings.plugin.item',
         key: VALUE_ROUTER_SETTINGS_NAMESPACE,
         locale: 'value-router',
-        inject: () => ({
-          config: form.getSnapshot().value ?? {} as ValueRouterConfig,
-          configForm: form,
-          onChange,
-          fetchModels,
-          clientCtx: ctx,
-        }),
+        inject: settingsProps,
       },
       ValueRouterSettingsCard,
     ),

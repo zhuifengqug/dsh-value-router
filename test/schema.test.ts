@@ -1,15 +1,30 @@
 /**
  * 设置 schema 的**宿主契约测试**。
  *
- * 这条测试存在的理由：DSH 0.1.7-rc.2 时代 `Config` 用普通 `.default()` 一直没问题，
- * 但宿主在 0.2.0 的 `volatileForm()` 里改成**只保留 volatile 字段**，于是整个条目被
- * 静默跳过——设置里不出现卡片、写入报「配置不可写」，而 tsc 与既有 92 个测试**全绿**。
- * 类型和纯函数都测不出这个问题，只有复刻宿主那条过滤规则才测得出来。
+ * 这条测试存在的原因：同一个症状栽了两次，都是「设置里没有卡片 + 写入报不可写」，
+ * 而 tsc 与既有测试**全绿**：
+ *
+ * 1. 忘了给字段加 `.volatile()` —— 宿主 `volatileForm()` 只保留 volatile 字段，
+ *    每个叶子被丢弃，整个条目在 `describe():419` 被跳过。
+ * 2. 忘了从 **entry 模块** re-export `Config` —— 宿主 `schema(entry)` 读的是
+ *    `entry.fiber.runtime.Config`，也就是主入口模块的导出对象，整个模块对它不可见。
+ *
+ * 所以本文件**必须从 entry 模块导入**：只测 `core/schema.ts` 会漏掉第 2 种。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { Config } from '../src/core/schema.ts'
+import { Config } from '../src/index.ts'
+import { Config as SchemaModuleConfig } from '../src/core/schema.ts'
+
+test('回归：entry 模块必须导出 Config —— 宿主读的是 entry.fiber.runtime.Config', () => {
+  assert.notEqual(Config, undefined, 'entry 模块没有导出 Config，宿主读不到设置 schema')
+  assert.equal(Config, SchemaModuleConfig, 'entry 导出的必须是 core/schema.ts 里那一个')
+  // schemastery 的 schema 是**可调用对象**（函数 + toJSON），不是普通对象；
+  // 宿主判断用的是 `schema !== undefined && 'toJSON' in schema`，函数同样满足。
+  assert.equal(typeof (Config as { toJSON?: unknown }).toJSON, 'function', '宿主要求 schema 有 toJSON')
+  assert.equal(typeof (Config as { meta?: unknown }).meta, 'object', '宿主要读 schema.meta.volatile')
+})
 
 /**
  * 复刻 `dsh-settings/lib/index.js:122-131` 的 volatileForm()。

@@ -16,6 +16,8 @@ export const zh = {
 
   // —— 插件身份 ——
   title: '价值路由',
+  /** 设置左侧栏里的独立分区标题。 */
+  sectionLabel: '价值路由',
   description:
     '主模型永不被接管。主控没显式指定线路时，子代理按轮转池依次分配——并行的子代理落在不同模型上，既补上思考盲区，也避开单条线路的并发瓶颈。对所有预设生效。',
   descSupplement: '线路从你已经配置好的供应商中选择，不需要重新填写 API Key。',
@@ -106,6 +108,8 @@ export const en: Record<ValueRouterLocaleKey, string> = {
   catalogLoadFailed: 'The model catalog could not be loaded. Please retry.',
 
   title: 'Value Router',
+  /** Sidebar section title in Settings. */
+  sectionLabel: 'Value Router',
   description:
     'The primary model is never taken over. When the controller does not name a route, subagents are assigned by rotating through the pool — parallel subagents land on different models, which covers more thinking blind spots and avoids a single-route concurrency bottleneck. Applies to every preset.',
   descSupplement: 'Routes are chosen from providers already configured in DeepSeek Harness without re-entering API keys.',

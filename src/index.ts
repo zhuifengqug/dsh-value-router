@@ -67,6 +67,22 @@ export * from './core/runtime-telemetry.ts'
 export * from './core/snapshot.ts'
 export * from './typert.ts'
 
+/**
+ * 设置 schema **必须从 entry 模块导出**。
+ *
+ * 宿主 `dsh-settings/lib/index.js:538-541` 读的是 `entry.fiber?.runtime?.Config`，
+ * 而 `entry.fiber.runtime` 就是本包**主入口模块**的导出对象。少这一行 re-export，
+ * 宿主拿到 `undefined` → `describe()` 在 `:417` 把整个条目跳过 → 命名空间不被服务
+ * → 客户端 form 恒为 `unavailable` / `writable:false`，表现为「设置里没有卡片」
+ * 与「当前配置不可写，请等待运行时连接恢复后重试」。
+ *
+ * 这个坑栽了两次：一次是忘了给字段加 `.volatile()`（字段被过滤），
+ * 一次是忘了导出 `Config`（整个模块对宿主不可见）。`test/schema.test.ts` 现在
+ * **从 entry 模块**断言，不再直接 import `core/schema.ts`——测对了规则、
+ * 测错了位置，等于没测。
+ */
+export { Config } from './core/schema.ts'
+
 export interface ValueRouterService {
   snapshot(): ValueRouterStatusSnapshot
   sessionMetrics(sessionId: string): SessionMetricsSnapshot
