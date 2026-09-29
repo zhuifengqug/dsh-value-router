@@ -5,6 +5,57 @@
 
 ---
 
+## 0.4.0 — 2026-09-29
+
+扁平轮转池 → **用户自定义的档位列表**。本版本同时修掉了 0.3.0 遗留的一个阻断性缺陷。
+
+### Fixed（阻断性，0.3.0 未发现）
+
+- **设置里不出现「价值路由」卡片 + 写入报「当前配置不可写」**。
+  根因：宿主 `dsh-settings/lib/index.js:122-131` 的 `volatileForm()` **只保留标记为
+  `volatile` 的字段**；旧 `Config` 全用普通 `.default()`，每个叶子被丢弃，
+  `Object.keys(dict).length === 0` 时整个条目在 `describe():419` 被跳过——命名空间
+  根本不被服务。`tsc` 与原有 92 个测试**全绿也测不出来**。
+  修法：所有叶子加 `.volatile()`，并移除 `z<ValueRouterConfig>` 标注（volatile 输出
+  类型是 `Volatile<T>`；宿主自身也不加该标注）。新增 `test/schema.test.ts`
+  **复刻宿主的过滤规则**做契约断言，防止该 bug 类复发。
+  / **Fixed (blocking):** the settings card never appeared and writes reported
+  "configuration not writable". The host's `volatileForm()` keeps only
+  volatile-marked fields; the old `Config` used plain `.default()` everywhere, so
+  every leaf was dropped and the entry was skipped in `describe()`. Neither `tsc`
+  nor the 92 existing tests could catch it. A new `test/schema.test.ts` replicates
+  the host's filter rule so the class cannot regress.
+
+### Breaking
+
+- **配置面：`pool: PoolLine[]`（扁平，线路自带 tier 标签）→ `tiers: Tier[]`（档位列表）**。
+  旧 `pool` 字段保留为**只读**，仅用于自动迁移。
+  / **Configuration: flat `pool` → user-defined `tiers` list.** The legacy `pool`
+  field is kept read-only, for migration only.
+
+### Added
+
+- **档位列表**：数量与名称都不限，**顺序即优先级**，`tiers[0]` 是最低档。
+  设置卡支持新增/删除/重命名档位，档内可增删与重排线路。
+  / **User-defined tiers**: any count, any names, list order is priority.
+- **自动迁移**：旧扁平 `pool` 按线路原有的 `tier` 标签归位（省 → 中 → 强），
+  标签缺失或非法的归入「中」档，**只创建实际有线路的档位**。用户无需手工搬数据。
+  / **Automatic migration** from the legacy flat pool, grouped by each route's tier label.
+
+### Changed
+
+- **兜底轮转只发生在最低档**（`tiers[0]`）。这是用户拍板的语义：主控没指定线路时默认
+  落最便宜的档；更高档位只被主控显式指定命中。
+  **后果要知道**：这样拿到的是**同档内的供应商多样性**，不是跨档多样性。
+  最低档自身无可路由线路时（例如全被白名单挡掉）依次尝试更高档，最后才用兜底线路。
+  / **Fallback rotation happens in the lowest tier only.** Higher tiers are reached
+  only by an explicit controller selection; the lowest tier is skipped upward when it
+  has no dispatchable route.
+- 提示词按档位分组呈现，并显式告知主控「不指定 = 从最低档轮转」。
+- 设置卡与顶栏气泡改为按档位分组展示；轮转预览只显示最低档的实际顺序。
+
+---
+
 ## 0.3.0 — 2026-09-29
 
 宿主从 **DSH 0.1.7-rc.2 升到 0.2.0-rc.1**（跨大版本）。本版本只做适配与验证，
@@ -152,6 +203,21 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.4.0 — 2026-09-29
+
+**Fixed (blocking, missed in 0.3.0):** the settings card never appeared and writes
+reported "configuration not writable". The host's `volatileForm()` keeps only
+volatile-marked fields; the old `Config` used plain `.default()` everywhere, so
+every leaf was dropped and the entry was skipped in `describe()`. Neither `tsc`
+nor the 92 existing tests could catch it. A new `test/schema.test.ts` replicates
+the host's filter rule so the class cannot regress.
+
+**Breaking:** flat `pool` → user-defined `tiers` list; the legacy field is kept
+read-only and migrated automatically by each route's tier label.
+
+**Changed:** fallback rotation happens in the lowest tier only; higher tiers are
+reached only by an explicit controller selection.
 
 ## 0.3.0 — 2026-09-29
 

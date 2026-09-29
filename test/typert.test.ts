@@ -137,7 +137,11 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   const full = {
     enabled: true,
     strategy: 'balanced',
-    pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap', allowed: true }],
+    tiers: [{
+      id: 'cheap',
+      label: '省',
+      pool: [{ provider: 'p', model: 'm', reasoningEffort: '', allowed: true }],
+    }],
     executor: { provider: 'p', model: 'm', reasoningEffort: '' },
     executorStatus: 'active',
     executorCallsTotal: 0,
@@ -154,16 +158,22 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   assert.equal(result.safeParse({ ...full, lastOutcome: 'none' }).success, false, '退役字段应被拒绝')
   // 0.2.0 起 scope 字段已随专属预设一起退役
   assert.equal(result.safeParse({ ...full, scope: 'global' }).success, false, '退役的 scope 字段应被拒绝')
+  // 0.4.0 起扁平 pool 被档位列表取代
+  assert.equal(result.safeParse({ ...full, pool: [] }).success, false, '退役的扁平 pool 应被拒绝')
   // 枚举值必须落在声明的取值内
   assert.equal(result.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
+  // 档位缺 id/label 会被 strict 拒绝：客户端要靠它们渲染分组
   assert.equal(
-    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'ultra', allowed: true }] }).success,
+    result.safeParse({ ...full, tiers: [{ pool: [] }] }).success,
     false,
-    '非法 tier 应被拒绝',
+    '缺 id/label 的档位应被拒绝',
   )
   // 缺 allowed 会被 strict 拒绝：客户端必须知道这条线路会不会被派发
   assert.equal(
-    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap' }] }).success,
+    result.safeParse({
+      ...full,
+      tiers: [{ id: 'cheap', label: '省', pool: [{ provider: 'p', model: 'm', reasoningEffort: '' }] }],
+    }).success,
     false,
     '缺 allowed 应被拒绝',
   )

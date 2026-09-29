@@ -89,8 +89,9 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const sessionOverride = liveMetrics?.override ?? null
   const resolved = resolveEffectiveConfig(liveConfig, sessionOverride ?? undefined)
   const fallbackComplete = isCompleteModelRoute(resolved.executor)
-  const poolSize = routableLines(resolved.pool).length
-  const blockedSize = resolved.pool.length - poolSize
+  const allLines = resolved.tiers.flatMap(tier => tier.pool)
+  const poolSize = routableLines(allLines).length
+  const blockedSize = allLines.length - poolSize
   const configured = poolSize > 0 || fallbackComplete
 
   useEffect(() => {
@@ -299,15 +300,24 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       <div className={headerStyles.setupHint}>会话覆写只写宿主内存，不改动全局设置；轮转池只能全局配置。</div>
 
       <div className={styles.roleSummary}>
-        <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>轮转池:</span>
-          <span className={styles.popoverItemValue}>
-            {poolSize > 0
-              ? routableLines(resolved.pool).map((line) => `${line.provider}/${line.model}`).join(' → ')
-              : '无可用线路（子代理将继承主模型）'}
-            {blockedSize > 0 ? `（另有 ${blockedSize} 条被宿主白名单挡住）` : ''}
-          </span>
-        </div>
+        {resolved.tiers.map((tier, index) => (
+          <div className={styles.popoverItem} key={tier.id}>
+            <span className={styles.popoverItemLabel}>
+              {index === 0 ? `轮转池（最低档 ${tier.label}）:` : `档位 ${tier.label}:`}
+            </span>
+            <span className={styles.popoverItemValue}>
+              {routableLines(tier.pool).length > 0
+                ? routableLines(tier.pool).map(line => `${line.provider}/${line.model}`).join(' → ')
+                : '无可用线路'}
+            </span>
+          </div>
+        ))}
+        {resolved.tiers.length === 0 && (
+          <div className={styles.popoverItem}>
+            <span className={styles.popoverItemLabel}>轮转池:</span>
+            <span className={styles.popoverItemValue}>未配置（子代理将继承主模型）</span>
+          </div>
+        )}
         <div className={styles.popoverItem}>
           <span className={styles.popoverItemLabel}>兜底线路:</span>
           <span className={styles.popoverItemValue}>{formatModel(resolved.executor)}</span>

@@ -33,7 +33,12 @@ export type ValueRouterStrategy = 'saver' | 'balanced' | 'powerful'
 /** 系统提示段角色：主控模型 / 执行子代理。 */
 export type ValueRouterRole = 'controller' | 'subagent'
 
-/** 线路档位标注。仅用于①生成提示词文案 ②UI 排序分组，**不参与路由判据**。 */
+/**
+ * 档位标注（0.2.x 遗留）。
+ *
+ * 0.4.0 起档位是**用户自定义**的（`tiers` 列表），数量与名称都不限。这个联合类型只在
+ * **旧扁平 pool 的迁移**里用到：按线路原有的 tier 标签自动归位。
+ */
 export type ValueRouterTier = 'cheap' | 'mid' | 'strong'
 
 /**
@@ -66,7 +71,6 @@ export interface PoolLine {
   provider: string
   model: string
   reasoningEffort?: string
-  tier: ValueRouterTier
   /**
    * 是否在宿主 `subagent-model-selection-settings.allowedModels` 里。
    * 只有 true 的线路参与轮转——这就是「不与白名单冲突」的实现方式：
@@ -81,8 +85,30 @@ export interface ResolvedPoolLine {
   provider: string
   model: string
   reasoningEffort: string
-  tier: ValueRouterTier
   allowed: boolean
+}
+
+/**
+ * 一个档位（用户自定义，数量与名称都不限）。
+ *
+ * **列表顺序即优先级**：`tiers[0]` 是最低档，也是主控没指定线路时的兜底轮转池。
+ * 越靠后的档位只会被「主控显式指定」命中。
+ */
+export interface Tier {
+  id: string
+  label: string
+  pool: PoolLine[]
+}
+
+export interface ResolvedTier {
+  id: string
+  label: string
+  pool: ResolvedPoolLine[]
+}
+
+/** 旧版（0.2.x / 0.3.x）扁平配置：线路自带 tier 标签。仅用于迁移。 */
+export interface LegacyPoolLine extends PoolLine {
+  tier?: ValueRouterTier
 }
 
 /** 会话级覆写（顶栏气泡写入，不污染全局配置）。 */
@@ -97,9 +123,17 @@ export interface ValueRouterConfig {
   /** 总开关。 */
   enabled?: boolean
   strategy?: ValueRouterStrategy
-  /** 轮转线路池，最多 POOL_MAX_LINES 条；空池 = 只做提示词，不改写任何线路。 */
-  pool?: PoolLine[]
-  /** 兜底线路：池为空、或池中目标 provider 不可用时使用。 */
+  /**
+   * 档位列表，**顺序即优先级**。`tiers[0]` = 最低档 = 主控未指定线路时的兜底轮转池。
+   * 空列表 = 只做提示词，不改写任何线路。
+   */
+  tiers?: Tier[]
+  /**
+   * 0.2.x / 0.3.x 的扁平池，**只读**，仅用于自动迁移到 `tiers`。
+   * 迁移按线路自带的 `tier` 标签归位；标签缺失或非法的归入「中」档。
+   */
+  pool?: LegacyPoolLine[]
+  /** 兜底线路：所有档位都不可路由时使用。 */
   executor?: ModelRouteSelection
   ambiguousPolicy?: AmbiguousPolicy
 }
@@ -108,7 +142,7 @@ export interface ValueRouterConfig {
 export interface ResolvedValueRouterConfig {
   enabled: boolean
   strategy: ValueRouterStrategy
-  pool: ResolvedPoolLine[]
+  tiers: ResolvedTier[]
   executor: ResolvedModelRoute
   ambiguousPolicy: AmbiguousPolicy
 }
@@ -120,7 +154,7 @@ export const DEFAULT_AMBIGUOUS_POLICY: AmbiguousPolicy = 'rotate'
 export const DEFAULT_CONFIG: ResolvedValueRouterConfig = {
   enabled: true,
   strategy: DEFAULT_STRATEGY,
-  pool: [],
+  tiers: [],
   executor: { provider: '', model: '', reasoningEffort: '' },
   ambiguousPolicy: DEFAULT_AMBIGUOUS_POLICY,
 }
@@ -155,34 +189,86 @@ export function resolveModelRoute(v: unknown): ResolvedModelRoute {
 }
 
 /**
- * 归一化轮转池。**不设条数上限**——用户的现实是订阅分散在多家 provider，
- * 同一个模型可以在多家各放一条，用轮转把额度摊开；硬上限反而挡了 legitimate 用法。
- *
- * 逐项校验：单项非法只丢这一项，不整池丢弃——编辑到一半的半成品不应该让其余线路全废。
- * `allowed` 默认 true；真正的白名单闸门在 resolvePoolEligibility() 里做。
+ * 归一化单个池内线路。单项非法返回 undefined（调用方丢弃这一条，不影响同池其它线路）。
  */
-export function resolvePool(v: unknown): ResolvedPoolLine[] {
-  if (!Array.isArray(v)) return []
-  const out: ResolvedPoolLine[] = []
-  for (const item of v) {
-    if (typeof item !== 'object' || item === null) continue
-    const raw = item as Record<string, unknown>
-    const provider = str(raw.provider)
-    const model = str(raw.model)
-    if (provider === '' || model === '') continue
-    out.push({
-      provider,
-      model,
-      reasoningEffort: str(raw.reasoningEffort),
-      tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
-      allowed: raw.allowed === false ? false : true,
-    })
+function resolveLine(item: unknown): ResolvedPoolLine | undefined {
+  if (typeof item !== 'object' || item === null) return undefined
+  const raw = item as Record<string, unknown>
+  const provider = str(raw.provider)
+  const model = str(raw.model)
+  if (provider === '' || model === '') return undefined
+  return {
+    provider,
+    model,
+    reasoningEffort: str(raw.reasoningEffort),
+    allowed: raw.allowed === false ? false : true,
   }
-  return out
 }
 
 /**
- * 用宿主白名单给池子打闸：不在 `allowedModels` 里的线路 `allowed=false`。
+ * 归一化一个档位。**不设条数上限**——用户的现实是订阅分散在多家 provider，
+ * 同一个模型可以在多家各放一条，用轮转把额度摊开。
+ */
+function resolveTier(item: unknown, index: number): ResolvedTier | undefined {
+  if (typeof item !== 'object' || item === null) return undefined
+  const raw = item as Record<string, unknown>
+  const id = str(raw.id) || `tier-${index + 1}`
+  const label = str(raw.label) || id
+  const pool = Array.isArray(raw.pool)
+    ? raw.pool.map(resolveLine).filter((line): line is ResolvedPoolLine => line !== undefined)
+    : []
+  return { id, label, pool }
+}
+
+/**
+ * 0.2.x / 0.3.x 扁平 pool → 0.4.0 档位列表的**自动迁移**。
+ *
+ * 按线路自带的 `tier` 标签归位；标签缺失或非法的归入「中」档。档位顺序固定为
+ * 省 → 中 → 强（与旧标签的语义强度一致），且**只创建实际有线路的档位**——
+ * 空档位对路由毫无用处，还会把「最低档」这个语义指向一个空池。
+ */
+export function migrateLegacyPool(legacy: unknown): ResolvedTier[] {
+  if (!Array.isArray(legacy) || legacy.length === 0) return []
+  const grouped = new Map<ValueRouterTier, ResolvedPoolLine[]>()
+  for (const item of legacy) {
+    const line = resolveLine(item)
+    if (line === undefined) continue
+    const rawTier = (item as Record<string, unknown>).tier
+    const tier: ValueRouterTier = rawTier === 'cheap' || rawTier === 'mid' || rawTier === 'strong'
+      ? rawTier
+      : 'mid'
+    const bucket = grouped.get(tier) ?? []
+    bucket.push(line)
+    grouped.set(tier, bucket)
+  }
+  const order: readonly { id: ValueRouterTier; label: string }[] = [
+    { id: 'cheap', label: '省' },
+    { id: 'mid', label: '中' },
+    { id: 'strong', label: '强' },
+  ]
+  return order
+    .filter(({ id }) => (grouped.get(id)?.length ?? 0) > 0)
+    .map(({ id, label }) => ({ id, label, pool: grouped.get(id) ?? [] }))
+}
+
+/**
+ * 归一化档位列表。`tiers` 为空但有旧 `pool` 时自动迁移——用户不需要手工搬数据。
+ */
+export function resolveTiers(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedTier[] {
+  const c = raw ?? {}
+  if (Array.isArray(c.tiers) && c.tiers.length > 0) {
+    const out: ResolvedTier[] = []
+    c.tiers.forEach((item, index) => {
+      const tier = resolveTier(item, index)
+      if (tier !== undefined) out.push(tier)
+    })
+    return out
+  }
+  return migrateLegacyPool(c.pool)
+}
+
+/**
+ * 用宿主白名单给所有档位打闸：不在 `allowedModels` 里的线路 `allowed=false`。
  *
  * 白名单是唯一真源——插件不自己发明第二套授权。主控在提示词里看不到被挡的线路，
  * 就不会去指定它们；轮转也不会派到它们。两条冲突路径一起堵死。
@@ -195,12 +281,17 @@ export function applyAllowlist(
   config: ResolvedValueRouterConfig,
   allowlist: readonly { provider: string; model: string }[] | undefined,
 ): ResolvedValueRouterConfig {
-  const pool = config.pool.map(line => {
-    if (allowlist === undefined) return line.allowed ? line : { ...line, allowed: true }
-    const permitted = allowlist.some(route => routeKey(route.provider, route.model) === routeKey(line.provider, line.model))
-    return { ...line, allowed: permitted }
-  })
-  return { ...config, pool }
+  const permitted = (line: ResolvedPoolLine): boolean => {
+    if (allowlist === undefined) return true
+    return allowlist.some(route => routeKey(route.provider, route.model) === routeKey(line.provider, line.model))
+  }
+  return {
+    ...config,
+    tiers: config.tiers.map(tier => ({
+      ...tier,
+      pool: tier.pool.map(line => ({ ...line, allowed: permitted(line) })),
+    })),
+  }
 }
 
 /** 池里真正可参与轮转的线路。 */
@@ -219,7 +310,7 @@ export function resolveConfig(raw: Partial<ValueRouterConfig> | undefined | null
   return {
     enabled: bool(c.enabled, DEFAULT_CONFIG.enabled),
     strategy: oneOf(c.strategy, ['saver', 'balanced', 'powerful'] as const, DEFAULT_STRATEGY),
-    pool: resolvePool(c.pool),
+    tiers: resolveTiers(c),
     executor: resolveModelRoute(c.executor),
     ambiguousPolicy: oneOf(c.ambiguousPolicy, ['rotate', 'respect'] as const, DEFAULT_AMBIGUOUS_POLICY),
   }

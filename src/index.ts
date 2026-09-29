@@ -370,7 +370,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     // 廉价预检：不启用 / 不是子代理 / 无可轮转线路且兜底未配 → 直接放行，不触碰 llm。
     if (!base.enabled) return resolved
     if (!isSubagentSession(header)) return resolved
-    if (routableLines(base.pool).length === 0 && !isCompleteModelRoute(sanitizeExecutor(base.executor))) return resolved
+    if (!base.tiers.some(tier => routableLines(tier.pool).length > 0) && !isCompleteModelRoute(sanitizeExecutor(base.executor))) return resolved
 
     // 父会话线路 = 用户为这个父会话选的线路（子代理默认继承的就是它）。
     // 父会话不在表里（插件中途加载/冷恢复）→ undefined，走 ambiguousPolicy 近似。
@@ -390,10 +390,10 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     )
     const executor = sanitizeExecutor(effective.executor)
 
-    // 池中目标线路的可用性（无可轮转线路时目标就是兜底线路，只探一次）。
-    const { route: target } = pickTargetRoute(effective.pool, executor, rotationIndex ?? 0)
+    // 目标线路的可用性（所有档位都不可路由时目标就是兜底线路，只探一次）。
+    const { route: target } = pickTargetRoute(effective.tiers, executor, rotationIndex ?? 0)
     const targetAvailable = (await checkRouteAvailability(ctx.llm, target)) === 'ready'
-    const hasRoutable = routableLines(effective.pool).length > 0
+    const hasRoutable = effective.tiers.some(tier => routableLines(tier.pool).length > 0)
     const fallbackAvailable = hasRoutable && isCompleteModelRoute(executor)
       ? (await checkRouteAvailability(ctx.llm, executor)) === 'ready'
       : targetAvailable
@@ -481,7 +481,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       return {
         enabled: c.enabled,
         strategy: c.strategy,
-        pool: c.pool.map(line => ({ ...line })),
+        tiers: c.tiers.map(tier => ({ ...tier, pool: tier.pool.map(line => ({ ...line })) })),
         executor: { ...c.executor },
         executorStatus: executorHealth.status,
         ...(executorHealth.reason !== undefined ? { executorReason: executorHealth.reason } : {}),
@@ -515,7 +515,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
 
   try {
     ctx.logger?.info?.(
-      `value-router: apply() 完成（strategy=${currentConfig.strategy}, 池=${currentConfig.pool.length} 条, 兜底线路=${formatModelRoute(currentConfig.executor)}）`,
+      `value-router: apply() 完成（strategy=${currentConfig.strategy}, 档位=${currentConfig.tiers.length} 个 / 线路=${currentConfig.tiers.reduce((sum, tier) => sum + tier.pool.length, 0)} 条, 兜底线路=${formatModelRoute(currentConfig.executor)}）`,
     )
   } catch { /* ignore */ }
 

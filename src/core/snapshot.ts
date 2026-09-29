@@ -7,18 +7,19 @@
  * 只暴露脱敏后的最小必要状态，不含提示词、请求内容或凭据。
  */
 
-import type { ModelRouteSelection, PoolLine, ValueRouterStrategy } from './config.ts'
+import type { ModelRouteSelection, ResolvedTier, ValueRouterStrategy } from './config.ts'
 
 export interface ValueRouterStatusSnapshot {
   /** 价值路由总开关。 */
   enabled: boolean
   strategy: ValueRouterStrategy
   /**
-   * 轮转线路池。`allowed=false` 的条目表示它不在宿主白名单里，**不会参与轮转**，
-   * 客户端据此把它标灰提示用户去补白名单。
+   * 档位列表，顺序即优先级。`tiers[0]` 是最低档 = 兜底轮转池。
+   * 每条线路的 `allowed=false` 表示它不在宿主白名单里，**不会参与轮转**，
+   * 客户端据此把它标出来提示用户去补白名单。
    */
-  pool: PoolLine[]
-  /** 兜底线路：没有可轮转线路时使用。 */
+  tiers: ResolvedTier[]
+  /** 兜底线路：所有档位都不可路由时使用。 */
   executor: ModelRouteSelection
   /** 兜底线路通道健康度。 */
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
@@ -33,7 +34,7 @@ export interface ValueRouterStatusSnapshot {
 export const EMPTY_STATUS_SNAPSHOT: ValueRouterStatusSnapshot = {
   enabled: false,
   strategy: 'balanced',
-  pool: [],
+  tiers: [],
   executor: { provider: '', model: '', reasoningEffort: '' },
   executorStatus: 'disabled',
   executorCallsTotal: 0,

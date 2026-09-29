@@ -15,16 +15,15 @@ import type {
   ModelRouteSelection,
   PoolLine,
   ResolvedPoolLine,
+  Tier,
   ValueRouterConfig,
   ValueRouterStrategy,
-  ValueRouterTier,
 } from '../core/config.ts'
 import {
   isCompleteModelRoute,
   resolveEffectiveConfig,
   routableLines,
   strategyLabel,
-  tierLabel,
 } from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
 import { useValueRouterConfig } from './useValueRouterConfig.ts'
@@ -45,7 +44,6 @@ export interface ValueRouterSettingsCardProps {
 }
 
 const STRATEGIES: readonly ValueRouterStrategy[] = ['saver', 'balanced', 'powerful']
-const TIERS: readonly ValueRouterTier[] = ['cheap', 'mid', 'strong']
 
 const STRATEGY_DESC: Record<ValueRouterStrategy, string> = {
   saver: '少派发，能自己做的就自己做，控制子代理调用量',
@@ -86,7 +84,7 @@ const SelectField: React.FC<SelectFieldProps> = ({ label, value, options, onComm
 
 /**
  * 把会话内即将出现的线路顺序摊开给用户看——轮转是可预测的，值得明示。
- * 只列白名单放行的线路：被挡住的那些根本不会被派发。
+ * **只显示最低档**：那才是主控不指定时的实际轮转池。
  */
 function rotationPreview(pool: readonly ResolvedPoolLine[], samples = 6): string {
   const usable = routableLines(pool)
@@ -106,15 +104,20 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
   const dock = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('desktop-dock-setting')
   const liveConfig = useValueRouterConfig(configForm, config)
   const resolved = resolveEffectiveConfig(liveConfig)
-  const pool = resolved.pool
+  const tierList = resolved.tiers
+  const totalLines = tierList.reduce((sum, tier) => sum + tier.pool.length, 0)
   const fallbackComplete = isCompleteModelRoute(resolved.executor)
-  const usable = pool.length > 0 || fallbackComplete
+  const usable = totalLines > 0 || fallbackComplete
   const [pickingFallback, setPickingFallback] = useState(false)
-  const [pickingFor, setPickingFor] = useState<number | null>(null)
+  const [pickingFor, setPickingFor] = useState<{ tier: number; line: number } | null>(null)
   const [saveError, setSaveError] = useState<string | null>(null)
   const liveStatus = useLiveStatus(clientCtx, true)
 
-  const preview = useMemo(() => rotationPreview(liveStatus?.pool ?? pool), [liveStatus?.pool, pool])
+  const liveTiers = liveStatus?.tiers ?? tierList
+  const preview = useMemo(
+    () => rotationPreview(liveTiers[0]?.pool ?? []),
+    [liveTiers],
+  )
 
   // —— 写入 ——
   const persist = useCallback((patch: Partial<ValueRouterConfig>): void => {
@@ -126,7 +129,12 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
           reportValueRouterTelemetry({ kind: 'state', state: patch.enabled ? 'enabled' : 'disabled', source: 'settings' })
         }
         if (patch.strategy !== undefined) reportValueRouterTelemetry({ kind: 'strategy', strategy: patch.strategy })
-        if (patch.pool !== undefined) reportValueRouterTelemetry({ kind: 'pool', size: patch.pool.length })
+        if (patch.tiers !== undefined) {
+          reportValueRouterTelemetry({
+            kind: 'pool',
+            size: patch.tiers.reduce((sum, tier) => sum + tier.pool.length, 0),
+          })
+        }
       })
       .catch((reason) => {
         setSaveError(errorText(reason, '配置写入失败，请重试。'))
@@ -139,27 +147,57 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
     persist({ enabled: !resolved.enabled })
   }
 
-  const commitPool = (next: PoolLine[]): void => persist({ pool: next })
+  const commitTiers = (next: Tier[]): void => persist({ tiers: next })
 
-  const handleAddLine = (): void => {
-    commitPool([...pool, { provider: '', model: '', reasoningEffort: '', tier: 'mid' }])
+  const handleAddTier = (): void => {
+    const id = `tier-${tierList.length + 1}`
+    commitTiers([...tierList, { id, label: `档${tierList.length + 1}`, pool: [] }])
   }
 
-  const handleRemoveLine = (index: number): void => {
-    commitPool(pool.filter((_, i) => i !== index))
+  const handleRemoveTier = (index: number): void => {
+    commitTiers(tierList.filter((_, i) => i !== index))
   }
 
-  const handleMoveLine = (index: number, delta: number): void => {
+  const handleMoveTier = (index: number, delta: number): void => {
     const target = index + delta
-    if (target < 0 || target >= pool.length) return
-    const next = [...pool]
+    if (target < 0 || target >= tierList.length) return
+    const next = [...tierList]
     const [moved] = next.splice(index, 1)
     next.splice(target, 0, moved!)
-    commitPool(next)
+    commitTiers(next)
   }
 
-  const patchLine = (index: number, patch: Partial<PoolLine>): void => {
-    commitPool(pool.map((line, i) => (i === index ? { ...line, ...patch } : line)))
+  const patchTier = (index: number, patch: Partial<Tier>): void => {
+    commitTiers(tierList.map((tier, i) => (i === index ? { ...tier, ...patch } : tier)))
+  }
+
+  const handleAddLine = (tierIndex: number): void => {
+    const tier = tierList[tierIndex]
+    if (tier === undefined) return
+    patchTier(tierIndex, { pool: [...tier.pool, { provider: '', model: '', reasoningEffort: '' }] })
+  }
+
+  const handleRemoveLine = (tierIndex: number, lineIndex: number): void => {
+    const tier = tierList[tierIndex]
+    if (tier === undefined) return
+    patchTier(tierIndex, { pool: tier.pool.filter((_, i) => i !== lineIndex) })
+  }
+
+  const handleMoveLine = (tierIndex: number, lineIndex: number, delta: number): void => {
+    const tier = tierList[tierIndex]
+    if (tier === undefined) return
+    const target = lineIndex + delta
+    if (target < 0 || target >= tier.pool.length) return
+    const pool = [...tier.pool]
+    const [moved] = pool.splice(lineIndex, 1)
+    pool.splice(target, 0, moved!)
+    patchTier(tierIndex, { pool })
+  }
+
+  const patchLine = (tierIndex: number, lineIndex: number, patch: Partial<PoolLine>): void => {
+    const tier = tierList[tierIndex]
+    if (tier === undefined) return
+    patchTier(tierIndex, { pool: tier.pool.map((line, i) => (i === lineIndex ? { ...line, ...patch } : line)) })
   }
 
   const handleFallbackSelected = (selection: ModelRouteSelection): void => {
@@ -203,70 +241,120 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
       {dock && !usable && (
         <div className={dockStyles.setupHint}>
-          <span>先添加至少一条轮转线路（或配置兜底线路），再开启路由。</span>
-          <button type="button" className={`${styles.button} ${styles.buttonPrimary}`} onClick={handleAddLine}>添加线路</button>
+          <span>先添加至少一个档位并放入线路（或配置兜底线路），再开启路由。</span>
+          <button type="button" className={`${styles.button} ${styles.buttonPrimary}`} onClick={handleAddTier}>添加档位</button>
         </div>
       )}
 
-      {/* —— 轮转线路池 —— */}
+      {/* —— 档位线路池：顺序即优先级，第一个 = 最低档 = 兜底轮转池 —— */}
       <div className={styles.section}>
-        <div className={styles.sectionTitle}>轮转线路池</div>
+        <div className={styles.sectionTitle}>子代理档位与线路池</div>
 
-        {pool.length === 0 ? (
-          <div className={styles.fieldHint}>尚未添加线路。没有池时子代理会继承主模型——那是最贵的一条。</div>
+        {tierList.length === 0 ? (
+          <div className={styles.fieldHint}>
+            尚未添加档位。没有档位时子代理会继承主模型——那是最贵的一条。
+          </div>
         ) : (
-          pool.map((line, index) => {
-            const complete = isCompleteModelRoute(line)
-            // allowed 由宿主白名单在 host 侧推导；读不到白名单时全为 true。
-            const live = liveStatus?.pool[index]
-            const allowed = live?.allowed ?? line.allowed ?? true
+          tierList.map((tier, tierIndex) => {
+            const isLowest = tierIndex === 0
+            const liveTier = liveTiers[tierIndex]
             return (
-              <div key={index} className={styles.fieldRow} data-value-router-pool-line={String(index)}>
+              <div key={tier.id} className={styles.fieldRow} data-value-router-tier={tier.id}>
                 <span className={styles.fieldLabel}>
-                  线路 {index + 1}
+                  第 {tierIndex + 1} 档
                   <span className={styles.fieldHint}>
-                    {line.provider ? `${line.provider} / ` : ''}{line.model || '未选择模型'}
-                    {allowed ? '' : ' · 不在宿主白名单，不会被派发'}
+                    {isLowest ? '最低档 —— 主控未指定线路时在这里轮转' : '仅在主控显式指定时命中'}
                   </span>
                 </span>
                 <div className={styles.strategyGroup}>
+                  <input
+                    className={styles.textInput}
+                    type="text"
+                    value={tier.label}
+                    aria-label={`第 ${tierIndex + 1} 档名称`}
+                    spellCheck={false}
+                    onChange={(event) => patchTier(tierIndex, { label: event.target.value })}
+                  />
                   <button
                     type="button"
                     className={styles.button}
-                    onClick={() => { setPickingFor(index); setPickingFallback(false) }}
-                  >
-                    {complete ? '更换模型' : '选择模型'}
-                  </button>
-                  <select
-                    className={styles.selectInput}
-                    value={line.tier}
-                    aria-label={`线路 ${index + 1} 档位`}
-                    onChange={(event) => patchLine(index, { tier: event.target.value as ValueRouterTier })}
-                  >
-                    {TIERS.map((tier) => (
-                      <option key={tier} value={tier}>{tierLabel(tier)}档</option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className={styles.button}
-                    aria-label={`上移线路 ${index + 1}`}
-                    disabled={index === 0}
-                    onClick={() => handleMoveLine(index, -1)}
+                    aria-label={`上移第 ${tierIndex + 1} 档`}
+                    disabled={tierIndex === 0}
+                    onClick={() => handleMoveTier(tierIndex, -1)}
                   >↑</button>
                   <button
                     type="button"
                     className={styles.button}
-                    aria-label={`下移线路 ${index + 1}`}
-                    disabled={index === pool.length - 1}
-                    onClick={() => handleMoveLine(index, 1)}
+                    aria-label={`下移第 ${tierIndex + 1} 档`}
+                    disabled={tierIndex === tierList.length - 1}
+                    onClick={() => handleMoveTier(tierIndex, 1)}
                   >↓</button>
                   <button
                     type="button"
                     className={styles.button}
-                    aria-label={`删除线路 ${index + 1}`}
-                    onClick={() => handleRemoveLine(index)}
-                  >删除</button>
+                    aria-label={`删除第 ${tierIndex + 1} 档`}
+                    onClick={() => handleRemoveTier(tierIndex)}
+                  >删除档位</button>
+                </div>
+
+                {tier.pool.length === 0 ? (
+                  <div className={styles.fieldHint}>该档还没有线路。</div>
+                ) : (
+                  tier.pool.map((line, lineIndex) => {
+                    const complete = isCompleteModelRoute(line)
+                    // allowed 由宿主白名单在 host 侧推导；读不到白名单时全为 true。
+                    const allowed = liveTier?.pool[lineIndex]?.allowed ?? line.allowed ?? true
+                    return (
+                      <div key={lineIndex} className={styles.fieldRow} data-value-router-pool-line={`${tierIndex}-${lineIndex}`}>
+                        <span className={styles.fieldLabel}>
+                          线路 {lineIndex + 1}
+                          <span className={styles.fieldHint}>
+                            {line.provider ? `${line.provider} / ` : ''}{line.model || '未选择模型'}
+                            {allowed ? '' : ' · 不在宿主白名单，不会被派发'}
+                          </span>
+                        </span>
+                        <div className={styles.strategyGroup}>
+                          <button
+                            type="button"
+                            className={styles.button}
+                            onClick={() => { setPickingFor({ tier: tierIndex, line: lineIndex }); setPickingFallback(false) }}
+                          >
+                            {complete ? '更换模型' : '选择模型'}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.button}
+                            aria-label={`上移线路 ${lineIndex + 1}`}
+                            disabled={lineIndex === 0}
+                            onClick={() => handleMoveLine(tierIndex, lineIndex, -1)}
+                          >↑</button>
+                          <button
+                            type="button"
+                            className={styles.button}
+                            aria-label={`下移线路 ${lineIndex + 1}`}
+                            disabled={lineIndex === tier.pool.length - 1}
+                            onClick={() => handleMoveLine(tierIndex, lineIndex, 1)}
+                          >↓</button>
+                          <button
+                            type="button"
+                            className={styles.button}
+                            aria-label={`删除线路 ${lineIndex + 1}`}
+                            onClick={() => handleRemoveLine(tierIndex, lineIndex)}
+                          >删除</button>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
+
+                <div className={styles.fieldRow}>
+                  <button
+                    type="button"
+                    className={styles.button}
+                    onClick={() => handleAddLine(tierIndex)}
+                  >
+                    添加线路到第 {tierIndex + 1} 档
+                  </button>
                 </div>
               </div>
             )
@@ -277,13 +365,14 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
           <button
             type="button"
             className={`${styles.button} ${styles.buttonPrimary}`}
-            onClick={handleAddLine}
+            onClick={handleAddTier}
           >
-            添加线路
+            添加档位
           </button>
           <span className={styles.fieldHint}>
-            不限条数。列表顺序就是轮转顺序（第 N 个子代理拿第 N 条，取模循环）——把想优先用的供应商排在前面。
-            同一个模型可以在多家 provider 各放一条，用来把订阅额度摊开。档位只影响给主控的提示文案，不参与路由判据。
+            档位数量与名称都不限，<strong>顺序即优先级</strong>：第一个是最低档，也是主控没指定线路时的默认轮转池；
+            越靠后的档位只有主控显式指定才会命中。档内顺序同样是轮转顺序（第 N 个子代理拿第 N 条，取模循环）。
+            同一个模型可以在多家 provider 各放一条，用来把订阅额度摊开。
           </span>
         </div>
 
@@ -305,7 +394,7 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
               {fallbackComplete ? `${resolved.executor.provider} / ${resolved.executor.model}` : '未配置'}
             </div>
             <div className={`${styles.modelDesc} ${layout.modelDesc}`}>
-              只在轮转池为空、或池中目标线路的 provider 不可用时才用。宿主本身不提供任何默认线路——没有它，子代理会直接继承主模型。
+              只在所有档位都没有可派线路、或目标线路的 provider 不可用时才用。宿主本身不提供任何默认线路——没有它，子代理会直接继承主模型。
             </div>
           </div>
           <button
@@ -350,12 +439,12 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
       {(pickingFallback || pickingFor !== null) && (
         <ModelPicker
-          title={pickingFor !== null ? `选择线路 ${pickingFor + 1} 的模型` : '选择兜底线路'}
-          current={pickingFor !== null ? pool[pickingFor] : resolved.executor}
+          title={pickingFor !== null ? `选择第 ${pickingFor.tier + 1} 档 第 ${pickingFor.line + 1} 条线路的模型` : '选择兜底线路'}
+          current={pickingFor !== null ? tierList[pickingFor.tier]?.pool[pickingFor.line] : resolved.executor}
           selectHighestEffort
           onSelect={(selection) => {
             if (pickingFor !== null) {
-              patchLine(pickingFor, {
+              patchLine(pickingFor.tier, pickingFor.line, {
                 provider: selection.provider ?? '',
                 model: selection.model ?? '',
                 reasoningEffort: selection.reasoningEffort ?? '',

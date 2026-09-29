@@ -7,20 +7,21 @@
  *   3. 既没有可用池、也没有完整兜底线路 → 无处可派；
  *   4. B+1 放行：子会话的「首见意图」线路与父线路不同 ⇒ 主控显式指定过 ⇒ 尊重它；
  *      与父线路相同时按 ambiguousPolicy 决定（歧义，见 config.ts 的注释）；
- *   5. 目标线路 = 轮转池[N % 池长]，池空则用兜底 executor；
+ *   5. 目标线路 = 最低档（tiers[0]）的可路由线路里轮转 pool[N % 池长]；无则用兜底 executor；
  *   6. 目标 provider 不可用 → 降级到 executor；executor 也不可用 → 放行；
  *   7. 目标 === 本次请求本来会用的线路 → no-op 放行（不改写、不计数）。
  *
- * 0.2.0 的两处语义变化：
- * - **删掉 scope 门控**。专属预设已摘除，插件对全部预设生效。
- * - **删掉「无条件改写」**。旧实现把每个子会话都改写到同一个 executor，主控
- *   显式指定的模型会被覆盖掉；新实现只在主控没指定时才按轮转池分配。
+ * 版本语义变化：
+ * - 0.2.0 **删掉 scope 门控**（专属预设已摘除，插件对全部预设生效）；
+ *   同时**删掉「无条件改写」**，只在主控没指定时才分配线路。
+ * - 0.4.0 扁平 pool → **用户自定义的档位列表**；兜底只轮转最低档。
  */
 
 import type {
   AmbiguousPolicy,
   ResolvedModelRoute,
   ResolvedPoolLine,
+  ResolvedTier,
   ResolvedValueRouterConfig,
   SessionOverrideConfig,
   ValueRouterConfig,
@@ -101,21 +102,26 @@ export function pickOverride(
 }
 
 /**
- * 选目标线路：在**白名单放行**的池条目里按序号轮转，池空则用兜底线路。
+ * 选目标线路：在**最低档**（`tiers[0]`）的白名单放行线路里按序号轮转；无则用兜底线路。
  *
- * 被宿主白名单挡掉的池条目不参与轮转——这就是「不与白名单冲突」的落点：
- * 主控在提示词里看不到它们，也不会去指定它们，插件也不会派它们。
+ * 为什么只轮转最低档：用户的设计意图是「省 token 优先」——主控没指定线路时，
+ * 默认落最便宜的档；更高档位由**主控显式指定**命中（提示词里给了选档准则）。
+ * 副作用要知道：这样拿到的是**同档内的供应商多样性**，不是跨档多样性。
+ *
+ * 最低档自身无可路由线路时（例如全被白名单挡掉）依次尝试更高的档位，最后才用兜底线路
+ * ——总比让子代理继承主模型（最贵的一条）强。
  *
  * 轮转序号在会话首次观察时分配一次并固定（见 state.rotationIndexOf），
  * 因此同一子会话的多 step 请求永远落在同一条线上。
  */
 export function pickTargetRoute(
-  pool: readonly ResolvedPoolLine[],
+  tiers: readonly ResolvedTier[],
   executor: ResolvedModelRoute,
   rotationIndex: number,
 ): { route: ResolvedPoolLine | ResolvedModelRoute; source: 'pool' | 'fallback' } {
-  const usable = routableLines(pool)
-  if (usable.length > 0) {
+  for (const tier of tiers) {
+    const usable = routableLines(tier.pool)
+    if (usable.length === 0) continue
     const index = ((rotationIndex % usable.length) + usable.length) % usable.length
     return { route: usable[index]!, source: 'pool' }
   }
@@ -151,7 +157,7 @@ export function decideSubagentRoute(input: RouteDecisionInput): RouteDecision {
   // 永不接管主模型：只有子代理会话被改写。**第一位**，任何配置都不可绕过。
   if (input.origin !== 'subagent') return { route: false, reason: 'not-subagent' }
 
-  const hasPool = routableLines(effective.pool).length > 0
+  const hasPool = effective.tiers.some(tier => routableLines(tier.pool).length > 0)
   const hasFallback = isCompleteModelRoute(executor)
   if (!hasPool && !hasFallback) return { route: false, reason: 'no-target' }
 
@@ -161,7 +167,7 @@ export function decideSubagentRoute(input: RouteDecisionInput): RouteDecision {
   }
 
   const { route: target, source: targetSource } = pickTargetRoute(
-    effective.pool,
+    effective.tiers,
     executor,
     input.rotationIndex ?? 0,
   )

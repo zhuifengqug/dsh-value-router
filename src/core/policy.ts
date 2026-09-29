@@ -18,7 +18,7 @@
  */
 
 import type { ResolvedValueRouterConfig, ValueRouterRole, ValueRouterStrategy } from './config.ts'
-import { formatModelRoute, strategyLabel, tierLabel } from './config.ts'
+import { formatModelRoute, strategyLabel } from './config.ts'
 
 export const VALUE_ROUTER_SECTION_NAME = 'value-router:guidance'
 export const VALUE_ROUTER_SECTION_ORDER = 145
@@ -46,28 +46,39 @@ function dispatchGuidance(strategy: ValueRouterStrategy): string {
 }
 
 /**
- * 线路池段。**只列宿主白名单放行的线路**——主控看不到被挡掉的线路，就不会去指定它们，
- * 也就不会触发宿主侧的 `gateway/bad-request`。没有可列的线路时整段省略：
+ * 档位线路段。**只列宿主白名单放行的线路**——主控看不到被挡掉的线路，就不会去指定它们，
+ * 也就不会触发宿主侧的 `gateway/bad-request`。没有任何可列线路时整段省略：
  * 不能向模型承诺一个不存在的围栏。
+ *
+ * 呈现按档位分组，并显式告诉主控「不指定 = 最低档轮转」——否则它会以为不指定就是
+ * 继承主模型（事实确实如此，插件随后才会改写）。
  */
-function poolSegment(config: ResolvedValueRouterConfig): string {
-  const usable = config.pool.filter(line => line.allowed)
-  if (usable.length === 0) return ''
-  const blocked = config.pool.length - usable.length
-  const lines = usable
-    .map((line) => `    - ${line.provider}/${line.model}（${tierLabel(line.tier)}档）`)
+function tierSegment(config: ResolvedValueRouterConfig): string {
+  const usableTiers = config.tiers
+    .map(tier => ({ ...tier, pool: tier.pool.filter(line => line.allowed) }))
+    .filter(tier => tier.pool.length > 0)
+  if (usableTiers.length === 0) return ''
+
+  const blocked = config.tiers.reduce((sum, tier) => sum + tier.pool.filter(line => !line.allowed).length, 0)
+  const groups = usableTiers
+    .map((tier, index) => [
+      `  ${index === 0 ? `${tier.label}档（最低档，默认轮转池）` : `${tier.label}档`}：`,
+      ...tier.pool.map(line => `    - ${line.provider}/${line.model}`),
+    ].join('\n'))
     .join('\n')
+
   return [
     '',
-    '线路池（子代理可用线路）：',
-    lines,
+    '子代理线路池（按档位分组，档位顺序 = 成本从低到高）：',
+    groups,
     '规则：',
-    '· 你可以显式指定其中任意一条（subagent 的 provider / model / reasoning_effort 参数），',
-    '  也可以什么都不指定——什么都不指定时，系统会按上面的顺序轮转分配一条线路给你，',
-    '  这样并行的子代理会落在**不同模型 / 不同供应商**上，既避免思考盲区，也避免单条线路的并发瓶颈。',
+    '· 什么都不指定时，系统会从**最低档**的池子里按顺序轮转分配——并行的子代理因此',
+    '  落在不同供应商上，既摊开额度，也避免思考盲区。',
+    '· 你也可以显式指定上面任意一条（subagent 的 provider / model / reasoning_effort 参数），',
+    '  用来选一个更高档的模型处理需要判断力的任务。',
     '· 不要指定清单以外的线路：指定了会被宿主直接拒绝，该次工具调用失败。',
-    '· 选档参考：机械检索、批量改动 → 省档；需要设计判断或跨文件推理 → 中档；',
-    '  独立复核、安全关键结论、疑难根因 → 强档。',
+    '· 选档参考：机械检索、批量改动 → 最低档；需要设计判断或跨文件推理 → 中间档；',
+    '  独立复核、安全关键结论、疑难根因 → 最高档。',
     blocked > 0
       ? `· 另有 ${blocked} 条线路被宿主白名单挡住，未列在上表：它们不会被派发，你也不要指定。`
       : '',
@@ -92,8 +103,8 @@ function controllerSegment(config: ResolvedValueRouterConfig): string {
     '主模型永远不会被本插件改写；被改写的只有子代理。',
     dispatchGuidance(config.strategy),
     '不得以「来不及 / 太麻烦」为由回避派发：能用子代理做的大块工作，不要自己一条龙跑完。',
-    poolSegment(config),
-    `兜底线路（仅当轮转池为空、或你指定的线路 provider 不可用时才用）：${formatModelRoute(config.executor)}。`,
+    tierSegment(config),
+    `兜底线路（仅当所有档位都没有可派线路、或你指定的线路 provider 不可用时才用）：${formatModelRoute(config.executor)}。`,
     '子代理是「一次性」的：每次 subagent 调用都会新建独立子会话并继承上下文，开销很高；相同后续工作优先用 send_message 复用已有子代理。',
   ].filter(line => line !== '').join('\n')
 }

@@ -27,14 +27,20 @@ export interface ValueRouterPoolLineView {
   provider: string
   model: string
   reasoningEffort: string
-  tier: 'cheap' | 'mid' | 'strong'
   allowed: boolean
+}
+
+/** 一个档位。顺序即优先级，`tiers[0]` 是最低档 = 兜底轮转池。 */
+export interface ValueRouterTierView {
+  id: string
+  label: string
+  pool: ValueRouterPoolLineView[]
 }
 
 export interface ValueRouterStatusView {
   enabled: boolean
   strategy: ValueRouterStrategy
-  pool: ValueRouterPoolLineView[]
+  tiers: ValueRouterTierView[]
   executor: ModelRouteSelection
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
   executorReason?: string
@@ -157,8 +163,21 @@ function asPoolLine(value: unknown): ValueRouterPoolLineView | undefined {
     provider: raw.provider,
     model: raw.model,
     reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
-    tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
     allowed: raw.allowed !== false,
+  }
+}
+
+/** 档位视图：逐项兜底，宿主送来半残数据时不至于整档消失。 */
+function asTier(value: unknown): ValueRouterTierView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (typeof raw.id !== 'string' || typeof raw.label !== 'string') return undefined
+  return {
+    id: raw.id,
+    label: raw.label,
+    pool: Array.isArray(raw.pool)
+      ? raw.pool.map(asPoolLine).filter((line): line is ValueRouterPoolLineView => line !== undefined)
+      : [],
   }
 }
 
@@ -170,8 +189,8 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   return {
     enabled: raw.enabled,
     strategy: oneOf(raw.strategy, ['saver', 'balanced', 'powerful'] as const, 'balanced'),
-    pool: Array.isArray(raw.pool)
-      ? raw.pool.map(asPoolLine).filter((line): line is ValueRouterPoolLineView => line !== undefined)
+    tiers: Array.isArray(raw.tiers)
+      ? raw.tiers.map(asTier).filter((tier): tier is ValueRouterTierView => tier !== undefined)
       : [],
     executor: asRoute(raw.executor),
     executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),

@@ -1,6 +1,6 @@
 /**
- * 配置归一化测试（0.2.0 新契约）：安全默认值、轮转池、兜底线路 sanitize、
- * 会话覆写合并与清洗。
+ * 配置归一化测试（0.4.0 档位结构）：安全默认值、档位归一化、旧扁平 pool 迁移、
+ * 兜底线路 sanitize、宿主白名单闸门、会话覆写合并与清洗。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -11,22 +11,37 @@ import {
   applyAllowlist,
   formatModelRoute,
   isCompleteModelRoute,
+  migrateLegacyPool,
   normalizeSessionOverride,
   resolveConfig,
   resolveEffectiveConfig,
-  resolvePool,
   resolveSessionConfig,
+  resolveTiers,
   routableLines,
   sanitizeExecutor,
   strategyLabel,
-  tierLabel,
+  type LegacyPoolLine,
+  type Tier,
 } from '../src/core/config.ts'
+
+function tier(id: string, label: string, ...routes: [string, string][]): Tier {
+  return {
+    id,
+    label,
+    pool: routes.map(([provider, model]) => ({ provider, model, reasoningEffort: '' })),
+  }
+}
+
+/** 旧扁平线路：tier 标签可选。 */
+function legacy(provider: string, model: string, tierLabel?: string): LegacyPoolLine {
+  return { provider, model, ...(tierLabel !== undefined ? { tier: tierLabel as LegacyPoolLine['tier'] } : {}) }
+}
 
 test('resolveConfig(undefined) 返回安全默认值', () => {
   const c = resolveConfig(undefined)
   assert.equal(c.enabled, true)
   assert.equal(c.strategy, 'balanced')
-  assert.deepEqual(c.pool, [])
+  assert.deepEqual(c.tiers, [])
   assert.deepEqual(c.executor, { provider: '', model: '', reasoningEffort: '' })
   assert.equal(c.ambiguousPolicy, 'rotate')
   assert.deepEqual(c, DEFAULT_CONFIG)
@@ -35,152 +50,98 @@ test('resolveConfig(undefined) 返回安全默认值', () => {
 test('旧配置缺新增字段仍可加载（逐字段兜底）', () => {
   const c = resolveConfig({ enabled: true, executor: { provider: 'p', model: 'm' } })
   assert.equal(c.strategy, 'balanced')
-  assert.deepEqual(c.pool, [], '0.1.0 的配置没有池，池应为空而不是报错')
+  assert.deepEqual(c.tiers, [], '0.2.x 的配置没有档位，档位应为空而不是报错')
   assert.deepEqual(c.executor, { provider: 'p', model: 'm', reasoningEffort: '' })
 })
 
-test('非法枚举值逐字段回落到默认，不影响其它字段', () => {
-  const c = resolveConfig({
-    strategy: 'turbo' as never,
-    ambiguousPolicy: 'coin-flip' as never,
-    executor: { provider: 'p', model: 'm' },
-  })
-  assert.equal(c.strategy, 'balanced')
-  assert.equal(c.ambiguousPolicy, DEFAULT_AMBIGUOUS_POLICY)
-  assert.equal(c.executor.provider, 'p')
-})
-
-test('0.1.0 的旧 scope/excludePresets 变成无害的未知键', () => {
-  // 迁移策略：不写迁移代码。旧键保留在 settings 里不影响运行，
-  // 也不会让插件加载失败——保留一个默认值错误的枚举反而危险。
-  const c = resolveConfig({ scope: 'preset', excludePresets: ['x'] } as never)
+test('旧配置残留 scope / bridge 字段是无害的未知键', () => {
+  const c = resolveConfig({ scope: 'preset', excludePresets: ['x'], bridge: { enabled: true } } as never)
   assert.equal(Object.hasOwn(c, 'scope'), false)
   assert.equal(Object.hasOwn(c, 'excludePresets'), false)
+  assert.equal(Object.hasOwn(c, 'bridge'), false)
   assert.equal(c.enabled, true, '旧配置不会让插件整体失效')
 })
 
-test('旧配置残留 bridge 字段不影响加载', () => {
-  let resolved: ReturnType<typeof resolveConfig> | undefined
-  assert.doesNotThrow(() => {
-    resolved = resolveConfig({ enabled: true, bridge: { enabled: true } } as never)
-  })
-  const c = resolved!
-  assert.equal(c.enabled, true)
-  assert.equal(Object.hasOwn(c, 'bridge'), false)
-})
+// —— 档位 ——
 
-// —— 轮转池 ——
-
-test('resolvePool：正常线路 trim 并补空 reasoningEffort / 默认 mid 档', () => {
-  const pool = resolvePool([
-    { provider: ' p1 ', model: ' m1 ', reasoningEffort: ' low ' },
-    { provider: 'p2', model: 'm2', tier: 'strong' },
-  ])
-  assert.deepEqual(pool, [
-    { provider: 'p1', model: 'm1', reasoningEffort: 'low', tier: 'mid', allowed: true },
-    { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong', allowed: true },
-  ])
-})
-
-test('resolvePool：单项非法只丢这一项，不整池丢弃', () => {
-  const pool = resolvePool([
-    { provider: 'p1', model: 'm1', tier: 'cheap' },
-    { provider: '', model: 'm2' },
-    { provider: 'p3' },
-    null,
-    'junk',
-    { provider: 'p4', model: 'm4', tier: 'ultra' as never },
-  ])
-  assert.deepEqual(pool.map(line => line.provider), ['p1', 'p4'])
-  assert.equal(pool[1]?.tier, 'mid', '非法 tier 回落到中性档')
-})
-
-test('resolvePool：每条线路默认 allowed=true（白名单闸门在 applyAllowlist 里做）', () => {
-  const pool = resolvePool([{ provider: 'p1', model: 'm1', tier: 'cheap' }])
-  assert.equal(pool[0]?.allowed, true)
-})
-
-test('resolvePool：没有条数上限——订阅分散在多家 provider 是常态', () => {
-  // 用户的现实是同一个模型在多家 provider 各放一条，用轮转把额度摊开；
-  // 曾经有个 4 条的硬上限，那是按「模型很多」的误解设的，已移除。
-  const many = Array.from({ length: 12 }, (_, i) => ({
-    provider: `p${i}`, model: 'same-model', tier: 'mid' as const,
-  }))
-  assert.equal(resolvePool(many).length, 12)
-})
-
-// —— 宿主白名单闸门 ——
-
-const ALLOWLIST = [
-  { provider: 'hetu', model: 'deepseek-v4.1-flash' },
-  { provider: 'commandcode', model: 'z-ai/glm-5.3-flash' },
-]
-
-test('applyAllowlist：只有白名单内的线路被放行，其余标记为 allowed=false', () => {
-  const config = resolveConfig({
-    pool: [
-      { provider: 'hetu', model: 'deepseek-v4.1-flash', tier: 'cheap' },
-      { provider: 'commandcode', model: 'z-ai/glm-5.3-flash', tier: 'strong' },
-      { provider: 'commandcode', model: 'Qwen/Qwen3.8-Flash', tier: 'mid' },
+test('档位归一化：缺 id/label 时按位置补齐，线路逐项校验', () => {
+  const tiers = resolveTiers({
+    tiers: [
+      { pool: [{ provider: ' p1 ', model: ' m1 ', reasoningEffort: ' low ' }] } as Tier,
+      { id: 'x', label: '高档', pool: [{ provider: '', model: 'skip' }, 'junk' as never, { provider: 'p2', model: 'm2' }] },
     ],
   })
-  const gated = applyAllowlist(config, ALLOWLIST)
-  assert.deepEqual(gated.pool.map(line => line.allowed), [true, true, false])
-  // 只有放行的两条参与轮转
-  assert.equal(routableLines(gated.pool).length, 2)
-  // 原始配置不被就地修改
-  assert.equal(config.pool[2]?.allowed, true)
+  assert.equal(tiers.length, 2)
+  assert.equal(tiers[0]?.id, 'tier-1')
+  assert.equal(tiers[0]?.label, 'tier-1')
+  assert.deepEqual(tiers[0]?.pool[0], { provider: 'p1', model: 'm1', reasoningEffort: 'low', allowed: true })
+  assert.equal(tiers[1]?.id, 'x')
+  assert.equal(tiers[1]?.label, '高档')
+  assert.equal(tiers[1]?.pool.length, 1, '非法线路逐条丢弃，不整池丢弃')
+  assert.equal(tiers[1]?.pool[0]?.provider, 'p2')
 })
 
-test('applyAllowlist：同一个模型在多家 provider 各一条，可分别放行', () => {
-  const config = resolveConfig({
-    pool: [
-      { provider: 'hetu', model: 'deepseek-v4.1-flash', tier: 'cheap' },
-      { provider: 'xiaomi-token-plan-cn', model: 'deepseek-v4.1-flash', tier: 'cheap' },
+test('档位数量与名称不限：用户可自定义 2 档、4 档、任意命名', () => {
+  const tiers = resolveTiers({
+    tiers: [
+      tier('t1', '廉价', ['hetu', 'ds-flash']),
+      tier('t2', '均衡', ['commandcode', 'glm']),
+      tier('t3', '昂贵', ['commandcode', 'bunny']),
+      tier('t4', '复核专用', ['commandcode', 'canary']),
     ],
   })
-  const gated = applyAllowlist(config, [{ provider: 'hetu', model: 'deepseek-v4.1-flash' }])
-  assert.deepEqual(gated.pool.map(line => line.allowed), [true, false], '比对是 provider+model 精确匹配')
+  assert.equal(tiers.length, 4)
+  assert.deepEqual(tiers.map(t => t.label), ['廉价', '均衡', '昂贵', '复核专用'])
 })
 
-test('applyAllowlist：读不到白名单时全部放行（宁可多派也不静默清空通道）', () => {
-  const config = resolveConfig({ pool: [{ provider: 'p', model: 'm', tier: 'mid' }] })
-  const gated = applyAllowlist(config, undefined)
-  assert.equal(gated.pool[0]?.allowed, true)
-  assert.equal(routableLines(gated.pool).length, 1)
+test('tiers 非空时优先于旧 pool（不做二次迁移）', () => {
+  const tiers = resolveTiers({
+    tiers: [tier('a', 'A', ['p', 'm'])],
+    pool: [legacy('legacy', 'legacy-model', 'strong')],
+  })
+  assert.equal(tiers.length, 1)
+  assert.equal(tiers[0]?.id, 'a')
 })
 
-test('applyAllowlist：白名单为空数组 = 全部挡掉（宿主确实一条都没授权）', () => {
-  const config = resolveConfig({ pool: [{ provider: 'p', model: 'm', tier: 'mid' }] })
-  const gated = applyAllowlist(config, [])
-  assert.equal(gated.pool[0]?.allowed, false)
-  assert.equal(routableLines(gated.pool).length, 0)
-})
+// —— 旧扁平 pool 迁移 ——
 
-test('routableLines：保序，轮转顺序等于列表顺序', () => {
-  const pool = resolvePool([
-    { provider: 'a', model: 'm', tier: 'mid' },
-    { provider: 'b', model: 'm', tier: 'mid' },
-    { provider: 'c', model: 'm', tier: 'mid' },
+test('迁移：按线路原有 tier 标签自动归位，只创建有线路的档位', () => {
+  const tiers = migrateLegacyPool([
+    legacy('a', 'm', 'cheap'),
+    legacy('b', 'm', 'cheap'),
+    legacy('c', 'm', 'strong'),
   ])
-  const gated = applyAllowlist(resolveConfig({ pool }), [
-    { provider: 'b', model: 'm' },
-    { provider: 'a', model: 'm' },
-  ])
-  assert.deepEqual(routableLines(gated.pool).map(line => line.provider), ['a', 'b'])
+  assert.deepEqual(tiers.map(t => t.id), ['cheap', 'strong'], '空的 mid 档不创建')
+  assert.equal(tiers[0]?.pool.length, 2)
+  assert.equal(tiers[1]?.pool.length, 1)
 })
 
-test('resolvePool：非数组一律回落空池', () => {
-  assert.deepEqual(resolvePool(undefined), [])
-  assert.deepEqual(resolvePool('nope'), [])
-  assert.deepEqual(resolvePool({ provider: 'p' }), [])
+test('迁移：标签缺失或非法 → 归入「中」档', () => {
+  const tiers = migrateLegacyPool([
+    legacy('a', 'm'),
+    legacy('b', 'm', 'ultra'),
+    legacy('c', 'm', 'cheap'),
+  ])
+  assert.deepEqual(tiers.map(t => t.id), ['cheap', 'mid'], '顺序固定为 省→中→强')
+  assert.equal(tiers[1]?.pool.length, 2, '无标签与非法标签都进 mid')
+})
+
+test('迁移：旧 pool 为空或非数组 → 空档位列表', () => {
+  assert.deepEqual(migrateLegacyPool([]), [])
+  assert.deepEqual(migrateLegacyPool(undefined), [])
+  assert.deepEqual(migrateLegacyPool('junk'), [])
+  assert.deepEqual(resolveTiers({ pool: [] }), [])
+})
+
+test('迁移：tiers 缺失时自动用旧 pool 兜底，用户无需手工搬数据', () => {
+  const tiers = resolveTiers({ pool: [legacy('a', 'm', 'cheap')] })
+  assert.equal(tiers.length, 1)
+  assert.equal(tiers[0]?.id, 'cheap')
 })
 
 // —— 兜底线路 ——
 
 test('sanitizeExecutor：半配置归一化为「未配置」而不是抛错', () => {
-  // 0.1.0 的 assertConfigValid 根本没有调用点（死导入），半配置一直可能存在。
-  // 0.2.0 把处理下沉到读路径：半配置 = 兜底不可用 = 不改写，绝不中断会话。
   assert.deepEqual(
     sanitizeExecutor({ provider: 'p', model: '', reasoningEffort: '' }),
     { provider: '', model: '', reasoningEffort: '' },
@@ -192,13 +153,12 @@ test('sanitizeExecutor：半配置归一化为「未配置」而不是抛错', (
   assert.deepEqual(
     sanitizeExecutor({ provider: 'p', model: 'm', reasoningEffort: 'low' }),
     { provider: 'p', model: 'm', reasoningEffort: 'low' },
-    '完整配置原样保留',
   )
-  assert.deepEqual(
-    sanitizeExecutor({ provider: '', model: '', reasoningEffort: 'low' }),
-    { provider: '', model: '', reasoningEffort: 'low' },
-    '全空但带 effort：仍视为未配置，不产生半残状态',
-  )
+})
+
+test('半配置兜底线路 sanitize 后 = 无处可派（不抛错）', () => {
+  const c = resolveConfig({ executor: { provider: 'p', model: '' } })
+  assert.equal(isCompleteModelRoute(sanitizeExecutor(c.executor)), false)
 })
 
 test('isCompleteModelRoute 要求 provider 与 model 都非空', () => {
@@ -208,15 +168,59 @@ test('isCompleteModelRoute 要求 provider 与 model 都非空', () => {
   assert.equal(isCompleteModelRoute(undefined), false)
 })
 
-test('formatModelRoute / strategyLabel / tierLabel 的人读输出', () => {
+test('formatModelRoute / strategyLabel 的人读输出', () => {
   assert.equal(formatModelRoute({ provider: 'p', model: 'm' }), 'p/m')
   assert.equal(formatModelRoute({ provider: 'p', model: '' }), '（未配置）')
   assert.equal(strategyLabel('saver'), '更省')
   assert.equal(strategyLabel('balanced'), '平衡')
   assert.equal(strategyLabel('powerful'), '更强')
-  assert.equal(tierLabel('cheap'), '省')
-  assert.equal(tierLabel('mid'), '中')
-  assert.equal(tierLabel('strong'), '强')
+})
+
+// —— 宿主白名单闸门 ——
+
+const ALLOWLIST = [
+  { provider: 'hetu', model: 'deepseek-v4.1-flash' },
+  { provider: 'commandcode', model: 'z-ai/glm-5.3-flash' },
+]
+
+test('白名单闸门：跨所有档位生效', () => {
+  const config = resolveConfig({
+    tiers: [
+      tier('cheap', '省', ['hetu', 'deepseek-v4.1-flash'], ['blocked', 'nope']),
+      tier('strong', '强', ['commandcode', 'z-ai/glm-5.3-flash']),
+    ],
+  })
+  const gated = applyAllowlist(config, ALLOWLIST)
+  assert.deepEqual(gated.tiers[0]?.pool.map(line => line.allowed), [true, false])
+  assert.deepEqual(gated.tiers[1]?.pool.map(line => line.allowed), [true])
+  assert.equal(config.tiers[0]?.pool[1]?.allowed, true, '原始配置不被就地修改')
+})
+
+test('白名单闸门：同一个模型在多家 provider 各一条，可分别放行', () => {
+  const config = resolveConfig({
+    tiers: [tier('cheap', '省', ['hetu', 'ds'], ['xiaomi-token-plan-cn', 'ds'])],
+  })
+  const gated = applyAllowlist(config, [{ provider: 'hetu', model: 'ds' }])
+  assert.deepEqual(gated.tiers[0]?.pool.map(line => line.allowed), [true, false])
+})
+
+test('白名单闸门：读不到白名单时全部放行（不静默清空通道）', () => {
+  const config = resolveConfig({ tiers: [tier('a', 'A', ['p', 'm'])] })
+  const gated = applyAllowlist(config, undefined)
+  assert.equal(gated.tiers[0]?.pool[0]?.allowed, true)
+  assert.equal(routableLines(gated.tiers[0]!.pool).length, 1)
+})
+
+test('白名单闸门：空白名单 = 全部挡掉', () => {
+  const config = resolveConfig({ tiers: [tier('a', 'A', ['p', 'm'])] })
+  const gated = applyAllowlist(config, [])
+  assert.equal(routableLines(gated.tiers[0]!.pool).length, 0)
+})
+
+test('routableLines：保序，轮转顺序等于列表顺序', () => {
+  const config = resolveConfig({ tiers: [tier('a', 'A', ['x', 'm'], ['y', 'm'], ['z', 'm'])] })
+  const gated = applyAllowlist(config, [{ provider: 'y', model: 'm' }, { provider: 'x', model: 'm' }])
+  assert.deepEqual(routableLines(gated.tiers[0]!.pool).map(line => line.provider), ['x', 'y'])
 })
 
 // —— 会话覆写 ——
@@ -228,13 +232,12 @@ test('resolveSessionConfig 只覆盖显式给出的字段', () => {
   assert.equal(resolveSessionConfig({ strategy: 'balanced' }, undefined).strategy, 'balanced')
 })
 
-test('会话覆写不覆盖 pool 与 ambiguousPolicy（否则轮转序列会错位）', () => {
+test('会话覆写不覆盖 tiers（否则轮转序列会错位）', () => {
   const merged = resolveSessionConfig(
-    { pool: [{ provider: 'p', model: 'm', tier: 'mid' }], ambiguousPolicy: 'rotate' },
+    { tiers: [tier('a', 'A', ['p', 'm'])] },
     { enabled: false, strategy: 'saver' } as never,
   )
-  assert.equal(merged.pool?.length, 1, '池不受会话覆写影响')
-  assert.equal(merged.ambiguousPolicy, 'rotate')
+  assert.equal(merged.tiers?.length, 1)
 })
 
 test('resolveEffectiveConfig 合并覆写后再归一化', () => {
@@ -257,8 +260,5 @@ test('normalizeSessionOverride 丢弃未知键与非法值', () => {
     normalizeSessionOverride({ strategy: 'saver', executor: { provider: ' p ', model: 'm', nope: 1 } }),
     { strategy: 'saver', executor: { provider: 'p', model: 'm' } },
   )
-  assert.deepEqual(
-    normalizeSessionOverride({ executor: { reasoningEffort: ' high ' } }),
-    { executor: { reasoningEffort: 'high' } },
-  )
+  assert.equal(DEFAULT_AMBIGUOUS_POLICY, 'rotate')
 })

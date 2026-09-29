@@ -53,16 +53,23 @@ const setSessionOverrideInput = z.object({
 
 // —— 结果 schema ——
 
+const poolLineSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  reasoningEffort: z.string(),
+  allowed: z.boolean(),
+}).strict()
+
+const tierSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  pool: z.array(poolLineSchema),
+}).strict()
+
 const statusResultSchema = z.object({
   enabled: z.boolean(),
   strategy: z.enum(['saver', 'balanced', 'powerful']),
-  pool: z.array(z.object({
-    provider: z.string(),
-    model: z.string(),
-    reasoningEffort: z.string(),
-    tier: z.enum(['cheap', 'mid', 'strong']),
-    allowed: z.boolean(),
-  }).strict()),
+  tiers: z.array(tierSchema),
   executor: routeSelectionSchema,
   executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
   executorReason: z.string().optional(),

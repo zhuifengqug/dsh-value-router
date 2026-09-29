@@ -17,17 +17,17 @@ import {
 } from '../src/core/config.ts'
 import { EMPTY_STATUS_SNAPSHOT } from '../src/core/snapshot.ts'
 
-/** 归一化后配置的键集（0.2.0 新契约：恰好 5 个字段）。 */
-const CONFIG_KEYS = ['ambiguousPolicy', 'enabled', 'executor', 'pool', 'strategy'] as const
+/** 归一化后配置的键集（0.4.0 新契约：恰好 5 个字段）。 */
+const CONFIG_KEYS = ['ambiguousPolicy', 'enabled', 'executor', 'strategy', 'tiers'] as const
 /** 状态快照的必填键集（executorReason 是唯一的可选键，缺省时不出现）。 */
-const SNAPSHOT_KEYS = ['allowlistKnown', 'enabled', 'executor', 'executorCallsTotal', 'executorStatus', 'pool', 'strategy'] as const
+const SNAPSHOT_KEYS = ['allowlistKnown', 'enabled', 'executor', 'executorCallsTotal', 'executorStatus', 'strategy', 'tiers'] as const
 
 test('配置面契约：resolveConfig 输出恰好 5 个字段', () => {
   const c = resolveConfig(undefined)
   assert.deepEqual(Object.keys(c).sort(), [...CONFIG_KEYS].sort())
   assert.deepEqual(c, DEFAULT_CONFIG)
   assert.deepEqual(c.executor, { provider: '', model: '', reasoningEffort: '' })
-  assert.deepEqual(c.pool, [])
+  assert.deepEqual(c.tiers, [])
   // 共享常量的契约
   assert.equal(VALUE_ROUTER_SETTINGS_NAMESPACE, 'value-router')
   assert.equal(DEFAULT_STRATEGY, 'balanced')
@@ -38,7 +38,7 @@ test('旧配置缺字段仍可加载：每个字段独立兜底', () => {
   const onlyExecutor = resolveConfig({ executor: { provider: 'p', model: 'm' } })
   assert.equal(onlyExecutor.enabled, DEFAULT_CONFIG.enabled)
   assert.equal(onlyExecutor.strategy, DEFAULT_CONFIG.strategy)
-  assert.deepEqual(onlyExecutor.pool, [])
+  assert.deepEqual(onlyExecutor.tiers, [])
   assert.equal(onlyExecutor.ambiguousPolicy, DEFAULT_CONFIG.ambiguousPolicy)
   assert.deepEqual(onlyExecutor.executor, { provider: 'p', model: 'm', reasoningEffort: '' })
 
@@ -61,7 +61,7 @@ test('状态快照契约：EMPTY_STATUS_SNAPSHOT 是服务未挂载时的安全�
   assert.deepEqual(Object.keys(EMPTY_STATUS_SNAPSHOT).sort(), [...SNAPSHOT_KEYS].sort())
   assert.equal(EMPTY_STATUS_SNAPSHOT.enabled, false, '未挂载时总开关读作关闭')
   assert.equal(EMPTY_STATUS_SNAPSHOT.strategy, 'balanced')
-  assert.deepEqual(EMPTY_STATUS_SNAPSHOT.pool, [])
+  assert.deepEqual(EMPTY_STATUS_SNAPSHOT.tiers, [])
   assert.deepEqual(EMPTY_STATUS_SNAPSHOT.executor, { provider: '', model: '', reasoningEffort: '' })
   assert.equal(EMPTY_STATUS_SNAPSHOT.executorStatus, 'disabled')
   assert.equal(EMPTY_STATUS_SNAPSHOT.executorCallsTotal, 0)

@@ -9,9 +9,10 @@ import { resolveConfig } from '../src/core/config.ts'
 import { VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER, buildSystemPromptGuidance } from '../src/core/policy.ts'
 
 const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
-const POOL = [
-  { provider: 'p1', model: 'cheap-model', tier: 'cheap' as const, allowed: true },
-  { provider: 'p2', model: 'strong-model', tier: 'strong' as const, allowed: true },
+const line = (provider: string, model: string, allowed = true) => ({ provider, model, reasoningEffort: '', allowed })
+const TIERS = [
+  { id: 'cheap', label: '省', pool: [line('p1', 'cheap-model'), line('p2', 'cheap-model-2')] },
+  { id: 'strong', label: '强', pool: [line('p3', 'strong-model')] },
 ]
 
 /**
@@ -46,7 +47,7 @@ test('controller 段：主控定位、派发倾向、send_message 复用提示',
 
 test('0.2.0：删掉了「无需也不应手动指定模型」这句与新需求冲突的旧文案', () => {
   const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, pool: POOL }),
+    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
     { role: 'controller' },
   )
   assert.doesNotMatch(text, /无需也不应手动指定模型/)
@@ -57,20 +58,23 @@ test('0.2.0：删掉了「无需也不应手动指定模型」这句与新需求
 
 test('线路池段：列出可用线路、说明轮转、禁止越界', () => {
   const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, pool: POOL }),
+    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
     { role: 'controller' },
   )
   assert.match(text, /线路池/)
-  assert.match(text, /p1\/cheap-model（省档）/)
-  assert.match(text, /p2\/strong-model（强档）/)
-  // 关键：必须告诉主控「不指定 = 系统会轮转」，否则它会以为不指定就是继承主模型
-  assert.match(text, /按上面的顺序轮转分配/)
-  assert.match(text, /不同模型/)
+  assert.match(text, /省档（最低档，默认轮转池）/)
+  assert.match(text, /p1\/cheap-model/)
+  assert.match(text, /强档/)
+  assert.match(text, /p3\/strong-model/)
+  // 关键：必须告诉主控「不指定 = 从最低档轮转」，否则它会以为不指定就是继承主模型
+  assert.match(text, /最低档/)
+  assert.match(text, /轮转分配/)
+  assert.match(text, /不同供应商/)
   assert.match(text, /不要指定清单以外的线路/)
   assert.doesNotMatch(text, FORBIDDEN_CHANNEL)
 })
 
-test('池为空时整段省略：不能向模型承诺不存在的围栏', () => {
+test('无档位时整段省略：不能向模型承诺不存在的围栏', () => {
   const text = buildSystemPromptGuidance(resolveConfig({ executor: FALLBACK }), { role: 'controller' })
   assert.doesNotMatch(text, /线路池/)
   assert.doesNotMatch(text, /不要指定清单以外的线路/)
@@ -82,7 +86,10 @@ test('池为空时整段省略：不能向模型承诺不存在的围栏', () =>
 test('白名单闸门：被挡住的线路不出现在提示词里，并显式告知主控', () => {
   const text = buildSystemPromptGuidance(resolveConfig({
     executor: FALLBACK,
-    pool: [...POOL, { provider: 'blocked', model: 'nope', tier: 'mid', allowed: false }],
+    tiers: [{
+      id: 'cheap', label: '省',
+      pool: [line('p1', 'cheap-model'), line('blocked', 'nope', false)],
+    }],
   }), { role: 'controller' })
   assert.match(text, /p1\/cheap-model/)
   assert.doesNotMatch(text, /blocked\/nope/, '被挡线路绝不能出现在清单里，否则主控会去指定它')
@@ -90,17 +97,18 @@ test('白名单闸门：被挡住的线路不出现在提示词里，并显式�
   assert.match(text, /不要指定/)
 })
 
-test('白名单闸门：全部被挡时整段省略（不能承诺不存在的围栏）', () => {
+test('白名单闸门：所有档位全被挡时整段省略（不能承诺不存在的围栏）', () => {
   const text = buildSystemPromptGuidance(resolveConfig({
     executor: FALLBACK,
-    pool: POOL.map(line => ({ ...line, allowed: false })),
+    tiers: TIERS.map(t => ({ ...t, pool: t.pool.map(l => ({ ...l, allowed: false })) })),
   }), { role: 'controller' })
   assert.doesNotMatch(text, /线路池/)
   assert.match(text, /兜底线路/)
 })
 
-test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {  const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, pool: POOL }),
+test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {
+  const text = buildSystemPromptGuidance(
+    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
     { role: 'controller' },
   )
   // agent/request 的 payload 里没有任务描述，插件在路由层无法判定复核类任务，
@@ -108,7 +116,7 @@ test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {  c
   assert.doesNotMatch(text, /强制/)
   assert.doesNotMatch(text, /必须.*强模型/)
   assert.match(text, /选档参考/)
-  assert.match(text, /独立复核.*强档/)
+  assert.match(text, /独立复核.*最高档/)
 })
 
 test('三档派发倾向：少用 / 正常 / 多用，文案互不相同', () => {
