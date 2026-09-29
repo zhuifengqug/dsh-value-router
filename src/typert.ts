@@ -90,6 +90,8 @@ const statusResultSchema = z.object({
 const sessionMetricsSchema = z.object({
   executorCalls: z.number().int().nonnegative(),
   override: overrideSchema.nullable(),
+  // 本会话（含后代子代理）的派发记录——徽章按会话展示，不能用全局流水
+  recentDispatches: z.array(dispatchSchema),
 }).strict()
 
 const setSessionOverrideResultSchema = z.object({

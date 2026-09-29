@@ -14,7 +14,7 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionOverrideConfig } from './core/config.ts'
 import { normalizeSessionOverride } from './core/config.ts'
-import type { ValueRouterStatusSnapshot } from './core/snapshot.ts'
+import type { ValueRouterStatusSnapshot, DispatchView } from './core/snapshot.ts'
 import { EMPTY_STATUS_SNAPSHOT } from './core/snapshot.ts'
 import { valueRouterState } from './core/state.ts'
 
@@ -22,6 +22,13 @@ import { valueRouterState } from './core/state.ts'
 export interface SessionMetricsWire {
   executorCalls: number
   override: SessionOverrideConfig | null
+  /**
+   * **本会话**（含其后代子代理）的实际派发记录，最新的在前。
+   *
+   * 放在会话指标而不是全局状态里，是因为徽章是按会话挂的——用户问的永远是
+   * 「这个会话把子代理派到哪去了」，不是「所有会话一共派了哪些」。
+   */
+  recentDispatches: DispatchView[]
 }
 
 export class ValueRouterStatusController extends TypertRemoteService {
@@ -48,6 +55,13 @@ export class ValueRouterStatusController extends TypertRemoteService {
     return {
       executorCalls: m.executorCalls,
       override: m.override ?? null,
+      recentDispatches: valueRouterState.recentDispatchesFor(sessionId, 8).map(record => ({
+        provider: record.provider,
+        model: record.model,
+        tierIndex: record.tierIndex ?? null,
+        origin: record.origin,
+        at: record.at,
+      })),
     }
   }
 

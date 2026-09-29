@@ -254,3 +254,38 @@ test('派发记录：resetAll 一并清空', () => {
   valueRouterState.resetAll()
   assert.deepEqual(valueRouterState.recentDispatches(), [])
 })
+
+test('派发记录按会话隔离：徽章只显示本会话的，不串到别的会话', () => {
+  valueRouterState.resetAll()
+  valueRouterState.recordDispatch({
+    sessionId: 'A', provider: 'p', model: 'a1', tierIndex: 0, origin: 'pool', at: 1,
+  })
+  valueRouterState.recordDispatch({
+    sessionId: 'B', provider: 'q', model: 'b1', tierIndex: 0, origin: 'pool', at: 2,
+  })
+  valueRouterState.recordDispatch({
+    sessionId: 'A', provider: 'p', model: 'a2', tierIndex: 0, origin: 'pool', at: 3,
+  })
+  assert.deepEqual(valueRouterState.recentDispatchesFor('A').map(r => r.model), ['a2', 'a1'])
+  assert.deepEqual(valueRouterState.recentDispatchesFor('B').map(r => r.model), ['b1'])
+  assert.deepEqual(valueRouterState.recentDispatchesFor('nobody'), [])
+})
+
+test('派发记录按会话聚合后代子代理：顶层会话看得到它派出的子代理', () => {
+  valueRouterState.resetAll()
+  valueRouterState.trackChildSession('child1', 'root')
+  valueRouterState.trackChildSession('child2', 'root')
+  valueRouterState.recordDispatch({
+    sessionId: 'child1', provider: 'p', model: 'c1', tierIndex: 0, origin: 'pool', at: 1,
+  })
+  valueRouterState.recordDispatch({
+    sessionId: 'child2', provider: 'p', model: 'c2', tierIndex: 0, origin: 'pool', at: 2,
+  })
+  assert.deepEqual(
+    valueRouterState.recentDispatchesFor('root').map(r => r.model),
+    ['c2', 'c1'],
+    '顶层会话应看到两个子代理的记录',
+  )
+  // 子会话自己只看到自己的
+  assert.deepEqual(valueRouterState.recentDispatchesFor('child1').map(r => r.model), ['c1'])
+})

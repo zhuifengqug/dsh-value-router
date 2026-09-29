@@ -203,16 +203,21 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   )
 })
 
-test('sessionMetrics 结果形状：executorCalls + override（可 null）', () => {
+test('sessionMetrics 结果形状：executorCalls + override（可 null）+ 本会话派发记录', () => {
   const metrics = TYPERT.invocations[1]!
   const result = materialize(metrics.result, 'sessionMetrics 结果')
-  const base = { executorCalls: 3, override: null }
+  const base = { executorCalls: 3, override: null, recentDispatches: [] }
   assert.equal(result.safeParse(base).success, true)
   assert.equal(
-    result.safeParse({ executorCalls: 0, override: { strategy: 'saver', executor: { provider: 'p', model: 'm', reasoningEffort: 'low' } } }).success,
+    result.safeParse({
+      executorCalls: 0,
+      override: { strategy: 'saver', executor: { provider: 'p', model: 'm', reasoningEffort: 'low' } },
+      recentDispatches: [],
+    }).success,
     true,
   )
-  assert.equal(result.safeParse({ executorCalls: 3 }).success, false, 'override 是必填键（可为 null）')
+  assert.equal(result.safeParse({ executorCalls: 3, override: null }).success, false, '缺 recentDispatches 应被拒绝')
+  assert.equal(result.safeParse({ executorCalls: 3, override: null, recentDispatches: [] }).success, true)
   assert.equal(result.safeParse({ override: null }).success, false, '缺 executorCalls 应被拒绝')
   assert.equal(result.safeParse({ ...base, extra: 1 }).success, false, '未知字段应被拒绝')
   assert.equal(result.safeParse({ ...base, executorCalls: -1 }).success, false, '负数计数应被拒绝')

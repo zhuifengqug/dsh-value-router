@@ -93,6 +93,8 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const poolSize = routableLines(allLines).length
   const blockedSize = allLines.length - poolSize
   const configured = poolSize > 0 || fallbackComplete
+  // 徽章按会话挂，所以派发记录也按会话取：本会话（含后代子代理）实际跑过哪些模型。
+  const sessionDispatches = liveMetrics?.recentDispatches ?? []
 
   useEffect(() => {
     overrideRef.current = sessionOverride
@@ -349,15 +351,15 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       {liveStatus && (
         <div className={styles.dispatchLog}>
           <div className={styles.dispatchLogHead}>
-            最近派发
-            {liveStatus.recentDispatches.length > 0 && `（${liveStatus.recentDispatches.length}）`}
+            本会话派发
+            {sessionDispatches.length > 0 && `（${sessionDispatches.length}）`}
           </div>
-          {liveStatus.recentDispatches.length === 0 ? (
+          {sessionDispatches.length === 0 ? (
             <div className={styles.dispatchEmpty}>
-              还没有派发记录。派发子代理后，这里会逐条显示它实际跑在哪个模型上。
+              这个会话还没有派发过子代理。派发后这里会显示它实际跑在哪个模型上。
             </div>
           ) : (
-            liveStatus.recentDispatches.slice(0, 8).map((record, index) => (
+            sessionDispatches.map((record, index) => (
               <div key={index} className={styles.dispatchRow}>
                 <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
                   {record.model}
@@ -507,8 +509,15 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         title="价值路由状态与快捷设置"
       >
         <span aria-hidden="true">VR</span>
-        <span>{label}</span>
-        <span className={styles.scopeTag}>{poolSize > 0 ? `池 ${poolSize}` : '无池'}</span>
+        <span className={styles.chipLabel}>{label}</span>
+        {sessionDispatches.length > 0 && (
+          // 本会话派发次数：徽章上就能看出"这个会话派过几个子代理"，
+          // 不必点开才知道值不值得点。
+          <span className={styles.chipCount} title={`本会话已派发 ${sessionDispatches.length} 个子代理`}>
+            {sessionDispatches.length}
+          </span>
+        )}
+        <span className={styles.chipTag}>{poolSize > 0 ? `池 ${poolSize}` : '无池'}</span>
       </button>
 
       {open && renderPortal(popover)}

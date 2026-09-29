@@ -64,6 +64,8 @@ export interface ValueRouterStatusView {
 export interface ValueRouterSessionMetrics {
   executorCalls: number
   override: SessionOverrideConfig | null
+  /** 本会话（含后代子代理）的实际派发记录，最新的在前。 */
+  recentDispatches: ValueRouterDispatchView[]
 }
 
 export interface ValueRouterRemoteFace {
@@ -254,6 +256,9 @@ function asSessionMetrics(value: unknown): ValueRouterSessionMetrics | undefined
   return {
     executorCalls: num(raw.executorCalls),
     override: asOverride(raw.override),
+    recentDispatches: Array.isArray(raw.recentDispatches)
+      ? raw.recentDispatches.flatMap(asDispatch)
+      : [],
   }
 }
 

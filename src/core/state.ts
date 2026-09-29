@@ -151,6 +151,21 @@ class ValueRouterStateManager {
     return this.dispatches.slice(-limit).reverse()
   }
 
+  /**
+   * **某个会话**最近的实际派发记录，最新的在前。
+   *
+   * 徽章是按会话挂的，所以它要展示的是「这个会话派过什么」而不是全局流水——
+   * 混在一起会让人把别的会话的派发误当成自己的。子代理会话自己也会被派发，
+   * 因此按 `parentSession` 回溯一层：顶层会话的记录包含它所有后代子代理的记录。
+   */
+  recentDispatchesFor(sessionId: string, limit = 8): DispatchRecord[] {
+    if (!sessionId) return []
+    return this.dispatches
+      .filter(record => record.sessionId === sessionId || this.isDescendantOf(record.sessionId, sessionId))
+      .slice(-limit)
+      .reverse()
+  }
+
   intentFor(sessionId: string): ChildRouteIntent | undefined {
     return this.intents.get(sessionId)
   }
