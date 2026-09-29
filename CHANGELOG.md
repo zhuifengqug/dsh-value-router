@@ -34,12 +34,19 @@
 
 ### Added
 
-- **轮转线路池**（`pool`，最多 4 条）：主控没显式指定线路时，子代理按
-  `pool[N % 池长]` 分配。并行的子代理——**以及 Agent Team 的队友**——会自然落在
-  不同模型上。设置卡给出实时轮转顺序预览。
-  / **Rotation pool** (up to 4 routes). When the controller does not name a route,
-  subagents are assigned by rotating through the pool, so parallel subagents — and
-  Agent Team teammates — land on different models.
+- **轮转线路池**（`pool`，**不限条数**）：主控没显式指定线路时，子代理按
+  `pool[N % 池长]` 分配。列表顺序即轮转顺序；同一个模型可以在多家 provider 各放一条，
+  用来把订阅额度摊开。设置卡给出实时轮转顺序预览。
+  / **Rotation pool** (no size limit). When the controller does not name a route,
+  subagents are assigned by rotating through the pool. List order is the rotation
+  order, and the same model may appear under several providers to spread quota.
+- **宿主白名单成为唯一真源**：插件在 host 侧读 `ctx.subagentModelSelection.current()`
+  的 `allowedModels`，不在白名单里的池条目标记 `allowed=false` 并**同时**从轮转与
+  提示词清单中排除。这堵死了唯一的真实冲突路径——主控指定一条宿主拒绝的线路导致
+  工具调用失败。读不到白名单时（服务未挂载 / 旧宿主）全部放行，不静默清空通道。
+  / **The host allowlist is the single source of truth.** Routes outside it are
+  excluded from both rotation and the prompt listing. When the allowlist cannot be
+  read, everything is allowed rather than silently emptying the channel.
 - **档位标注**（`cheap` / `mid` / `strong`）：只用于生成提示词文案与 UI 分组，
   **不参与路由判据**。
   / **Tier labels**: prompt text and UI grouping only, never a routing criterion.
@@ -101,10 +108,9 @@
   近似处理（默认 `rotate`）。
   / The host cannot distinguish an explicit selection equal to the parent route from
   inheritance; `ambiguousPolicy` approximates it.
-- 插件的线路池与宿主的 `subagent-model-selection-settings.allowedModels` 是**两份独立配置**，
-  不会自动同步。二者时序不同（宿主在子代理创建前校验工具参数，插件在创建后改写），
-  因此不会打架；最坏情况是主控选了宿主不认的线路 → 宿主抛 `gateway/bad-request`，
-  该次工具调用失败。
+- **插件的线路池与宿主的 `subagent-model-selection-settings.allowedModels` 曾是两份
+  会漂移的配置**。0.2.0 已改为：白名单是唯一真源，插件主动读取并据此闸门，
+  不在白名单内的池条目不会参与轮转、也不会出现在给主控的清单里。
 - 已在 `<DSH_HOME>/.agent-presets/` 留下旧 `value-router` 目录的安装**需要手动删除**
   （插件不会自动删，避免误删用户自建的同名预设）。
 

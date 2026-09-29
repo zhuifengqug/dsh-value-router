@@ -26,10 +26,12 @@ import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 
 import {
   VALUE_ROUTER_SETTINGS_NAMESPACE,
+  applyAllowlist,
   formatModelRoute,
   isCompleteModelRoute,
   resolveConfig,
   resolveEffectiveConfig,
+  routableLines,
   sanitizeExecutor,
   type ResolvedValueRouterConfig,
   type SessionOverrideConfig,
@@ -87,12 +89,50 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   let currentConfig: ResolvedValueRouterConfig = resolveConfig(initialConfig)
   let currentSource: () => Partial<ValueRouterConfig> = () => initialConfig
 
-  const getConfig = (): ResolvedValueRouterConfig => resolveConfig(currentSource())
+  /**
+   * 读宿主 `subagent-model-selection-settings` 的白名单。
+   *
+   * 宿主在**子代理创建前**用它校验主控显式指定的线路（`assertAllowedModelSelection`），
+   * 但纯继承不校验。插件的改写发生在创建之后，宿主根本看不到——所以必须由插件自己
+   * 拿同一份名单当闸门，否则主控指定一条被宿主拒绝的线路就会让工具调用失败。
+   *
+   * 用结构化类型而不是 import：`@deepseek-ai/dsh-tool-subagent/model-selection-settings`
+   * 是子路径导出的可选服务，宿主没挂载（或老宿主没有）时读不到。此时返回 undefined，
+   * applyAllowlist 会**全部放行**——宁可多派，也不静默清空用户的通道。
+   * （与本文件对 configEditor / agentPresets 的既有取法一致，不新增 peerDep。）
+   */
+  function hostAllowlist(): { provider: string; model: string }[] | undefined {
+    try {
+      const service = ctx.get('subagentModelSelection' as never) as
+        | { current?: () => { enabled?: unknown; allowedModels?: unknown } }
+        | undefined
+      const allowedModels = service?.current?.()?.allowedModels
+      if (!Array.isArray(allowedModels)) return undefined
+      const out: { provider: string; model: string }[] = []
+      for (const item of allowedModels) {
+        if (typeof item !== 'object' || item === null) continue
+        const route = item as Record<string, unknown>
+        if (typeof route.provider === 'string' && typeof route.model === 'string') {
+          out.push({ provider: route.provider, model: route.model })
+        }
+      }
+      return out
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 全局配置 + 宿主白名单闸门。会话覆写在此之后叠加。 */
+  function resolveGated(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedValueRouterConfig {
+    return applyAllowlist(resolveConfig(raw), hostAllowlist())
+  }
+
+  const getConfig = (): ResolvedValueRouterConfig => resolveGated(currentSource())
 
   // —— 兜底线路健康缓存（同步快照用；探活间隔刷新）——
   let executorHealth: ExecutorHealth = { status: 'disabled', executorHealth: 'unconfigured' }
   const refreshExecutorHealth = async (): Promise<void> => {
-    const effective = resolveEffectiveConfig(currentSource())
+    const effective = resolveGated(currentSource())
     const executor = sanitizeExecutor(effective.executor)
     executorHealth = await checkRouteAvailability(ctx.llm, executor).then((h) => ({
       status: !effective.enabled ? 'disabled' as const
@@ -170,7 +210,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     const entry = settingsEntry
     if (entry === undefined) return
     currentSource = () => (entry.options?.config ?? {}) as Partial<ValueRouterConfig>
-    currentConfig = resolveConfig(currentSource())
+    currentConfig = resolveGated(currentSource())
     void refreshExecutorHealth()
   }
 
@@ -231,7 +271,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   /** 取消条目绑定，回到 apply() 收到的 initialConfig。 */
   function resetConfigSource(): void {
     currentSource = () => initialConfig
-    currentConfig = resolveConfig(initialConfig)
+    currentConfig = resolveGated(initialConfig)
     void refreshExecutorHealth()
   }
 
@@ -249,7 +289,10 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       if (!resolveConfig(globalConfig).enabled) return ''
       const sessionId = typeof header?.id === 'string' ? header.id : undefined
       const override = sessionOverrideFor(sessionId, header?.parentSession)
-      const effective = resolveEffectiveConfig(globalConfig, override)
+      const effective = applyAllowlist(
+        resolveEffectiveConfig(globalConfig, override),
+        hostAllowlist(),
+      )
       if (!effective.enabled) return ''
       return buildSystemPromptGuidance(effective, {
         role: isSubagentSession(header) ? 'subagent' : 'controller',
@@ -302,7 +345,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     const resolved = await next()
 
     const globalConfig = currentSource()
-    const base = resolveConfig(globalConfig)
+    const base = applyAllowlist(resolveConfig(globalConfig), hostAllowlist())
 
     // 线路意图快照：**必须在任何改写之前**拍下来，且只拍第一次。
     // 官方注释（dsh-agent runtime-types.d.ts:312-314）明确 next() 首次返回
@@ -324,10 +367,10 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     }
     valueRouterState.pruneIntents(CHILD_INTENT_MAX_ENTRIES)
 
-    // 廉价预检：不启用 / 不是子代理 / 池空且兜底未配 → 直接放行，不触碰 llm。
+    // 廉价预检：不启用 / 不是子代理 / 无可轮转线路且兜底未配 → 直接放行，不触碰 llm。
     if (!base.enabled) return resolved
     if (!isSubagentSession(header)) return resolved
-    if (base.pool.length === 0 && !isCompleteModelRoute(sanitizeExecutor(base.executor))) return resolved
+    if (routableLines(base.pool).length === 0 && !isCompleteModelRoute(sanitizeExecutor(base.executor))) return resolved
 
     // 父会话线路 = 用户为这个父会话选的线路（子代理默认继承的就是它）。
     // 父会话不在表里（插件中途加载/冷恢复）→ undefined，走 ambiguousPolicy 近似。
@@ -341,13 +384,17 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       : valueRouterState.rotationIndexOf(sessionId, parentSessionId)
 
     const override = sessionOverrideFor(sessionId, parentSessionId)
-    const effective = resolveEffectiveConfig(globalConfig, override)
+    const effective = applyAllowlist(
+      resolveEffectiveConfig(globalConfig, override),
+      hostAllowlist(),
+    )
     const executor = sanitizeExecutor(effective.executor)
 
-    // 池中目标线路的可用性（池为空时目标就是兜底线路，只探一次）。
+    // 池中目标线路的可用性（无可轮转线路时目标就是兜底线路，只探一次）。
     const { route: target } = pickTargetRoute(effective.pool, executor, rotationIndex ?? 0)
     const targetAvailable = (await checkRouteAvailability(ctx.llm, target)) === 'ready'
-    const fallbackAvailable = effective.pool.length > 0 && isCompleteModelRoute(executor)
+    const hasRoutable = routableLines(effective.pool).length > 0
+    const fallbackAvailable = hasRoutable && isCompleteModelRoute(executor)
       ? (await checkRouteAvailability(ctx.llm, executor)) === 'ready'
       : targetAvailable
 
@@ -439,6 +486,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         executorStatus: executorHealth.status,
         ...(executorHealth.reason !== undefined ? { executorReason: executorHealth.reason } : {}),
         executorCallsTotal: valueRouterState.getGlobalMetrics().executorCalls,
+        allowlistKnown: hostAllowlist() !== undefined,
       }
     },
     sessionMetrics: (sessionId: string) => valueRouterState.getSessionMetrics(sessionId),

@@ -27,9 +27,6 @@
 
 export const VALUE_ROUTER_SETTINGS_NAMESPACE = 'value-router'
 
-/** 轮转池的硬上限：多样性收益在 3-4 条饱和，再多只会扩大主控的选择空间。 */
-export const POOL_MAX_LINES = 4
-
 /** 三档策略：决定子代理派发提示文案的积极程度。 */
 export type ValueRouterStrategy = 'saver' | 'balanced' | 'powerful'
 
@@ -64,20 +61,28 @@ export interface ResolvedModelRoute {
   reasoningEffort: string
 }
 
-/** 轮转池里的一条线路。 */
+/** 轮转池里的一条线路。`allowed` 由宿主白名单推导，不写进设置。 */
 export interface PoolLine {
   provider: string
   model: string
   reasoningEffort?: string
   tier: ValueRouterTier
+  /**
+   * 是否在宿主 `subagent-model-selection-settings.allowedModels` 里。
+   * 只有 true 的线路参与轮转——这就是「不与白名单冲突」的实现方式：
+   * 白名单是唯一真源，插件不自己发明第二套授权。
+   * 读不到宿主白名单时全部视为 true（宁可放行也不静默清空通道）。
+   */
+  allowed?: boolean
 }
 
-/** 归一化后的池内线路（reasoningEffort 归一化为字符串，可为空）。 */
+/** 归一化后的池内线路。 */
 export interface ResolvedPoolLine {
   provider: string
   model: string
   reasoningEffort: string
   tier: ValueRouterTier
+  allowed: boolean
 }
 
 /** 会话级覆写（顶栏气泡写入，不污染全局配置）。 */
@@ -134,6 +139,11 @@ function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : ''
 }
 
+/** 线路的 'provider/model' 归一化键——白名单比对与歧义判定共用同一口径。 */
+export function routeKey(provider: string, model: string): string {
+  return `${provider}/${model}`
+}
+
 /** 归一化模型路由选择：全部为 trim 后的字符串，缺省空串。 */
 export function resolveModelRoute(v: unknown): ResolvedModelRoute {
   const raw = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>
@@ -145,17 +155,16 @@ export function resolveModelRoute(v: unknown): ResolvedModelRoute {
 }
 
 /**
- * 归一化轮转池。
+ * 归一化轮转池。**不设条数上限**——用户的现实是订阅分散在多家 provider，
+ * 同一个模型可以在多家各放一条，用轮转把额度摊开；硬上限反而挡了 legitimate 用法。
  *
- * 逐项校验：**单项非法只丢这一项，不整池丢弃**——用户在设置里编辑到一半的半成品
- * 不应该让其余线路全部失效。超出上限时截断到前 POOL_MAX_LINES 条（保持用户排在前面的
- * 高优先级线路）。tier 缺失或非法时回落到 'mid'（中性档）。
+ * 逐项校验：单项非法只丢这一项，不整池丢弃——编辑到一半的半成品不应该让其余线路全废。
+ * `allowed` 默认 true；真正的白名单闸门在 resolvePoolEligibility() 里做。
  */
 export function resolvePool(v: unknown): ResolvedPoolLine[] {
   if (!Array.isArray(v)) return []
   const out: ResolvedPoolLine[] = []
   for (const item of v) {
-    if (out.length >= POOL_MAX_LINES) break
     if (typeof item !== 'object' || item === null) continue
     const raw = item as Record<string, unknown>
     const provider = str(raw.provider)
@@ -166,9 +175,37 @@ export function resolvePool(v: unknown): ResolvedPoolLine[] {
       model,
       reasoningEffort: str(raw.reasoningEffort),
       tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
+      allowed: raw.allowed === false ? false : true,
     })
   }
   return out
+}
+
+/**
+ * 用宿主白名单给池子打闸：不在 `allowedModels` 里的线路 `allowed=false`。
+ *
+ * 白名单是唯一真源——插件不自己发明第二套授权。主控在提示词里看不到被挡的线路，
+ * 就不会去指定它们；轮转也不会派到它们。两条冲突路径一起堵死。
+ *
+ * @param config 已归一化的配置
+ * @param allowlist 宿主白名单；`undefined` 表示**读不到**（服务未挂载 / 旧宿主），
+ *   此时全部放行——宁可多派，也不把用户的通道静默清空。
+ */
+export function applyAllowlist(
+  config: ResolvedValueRouterConfig,
+  allowlist: readonly { provider: string; model: string }[] | undefined,
+): ResolvedValueRouterConfig {
+  const pool = config.pool.map(line => {
+    if (allowlist === undefined) return line.allowed ? line : { ...line, allowed: true }
+    const permitted = allowlist.some(route => routeKey(route.provider, route.model) === routeKey(line.provider, line.model))
+    return { ...line, allowed: permitted }
+  })
+  return { ...config, pool }
+}
+
+/** 池里真正可参与轮转的线路。 */
+export function routableLines(pool: readonly ResolvedPoolLine[]): ResolvedPoolLine[] {
+  return pool.filter(line => line.allowed)
 }
 
 /**

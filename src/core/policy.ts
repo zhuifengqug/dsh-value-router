@@ -46,11 +46,15 @@ function dispatchGuidance(strategy: ValueRouterStrategy): string {
 }
 
 /**
- * 线路池段。池为空时**整段省略**——不能向模型承诺一个不存在的围栏。
+ * 线路池段。**只列宿主白名单放行的线路**——主控看不到被挡掉的线路，就不会去指定它们，
+ * 也就不会触发宿主侧的 `gateway/bad-request`。没有可列的线路时整段省略：
+ * 不能向模型承诺一个不存在的围栏。
  */
 function poolSegment(config: ResolvedValueRouterConfig): string {
-  if (config.pool.length === 0) return ''
-  const lines = config.pool
+  const usable = config.pool.filter(line => line.allowed)
+  if (usable.length === 0) return ''
+  const blocked = config.pool.length - usable.length
+  const lines = usable
     .map((line) => `    - ${line.provider}/${line.model}（${tierLabel(line.tier)}档）`)
     .join('\n')
   return [
@@ -60,11 +64,14 @@ function poolSegment(config: ResolvedValueRouterConfig): string {
     '规则：',
     '· 你可以显式指定其中任意一条（subagent 的 provider / model / reasoning_effort 参数），',
     '  也可以什么都不指定——什么都不指定时，系统会按上面的顺序轮转分配一条线路给你，',
-    '  这样并行的子代理会落在**不同模型**上，既避免思考盲区，也避免单条线路的并发瓶颈。',
+    '  这样并行的子代理会落在**不同模型 / 不同供应商**上，既避免思考盲区，也避免单条线路的并发瓶颈。',
     '· 不要指定清单以外的线路：指定了会被宿主直接拒绝，该次工具调用失败。',
     '· 选档参考：机械检索、批量改动 → 省档；需要设计判断或跨文件推理 → 中档；',
     '  独立复核、安全关键结论、疑难根因 → 强档。',
-  ].join('\n')
+    blocked > 0
+      ? `· 另有 ${blocked} 条线路被宿主白名单挡住，未列在上表：它们不会被派发，你也不要指定。`
+      : '',
+  ].filter(line => line !== '').join('\n')
 }
 
 /** 执行子代理段。 */

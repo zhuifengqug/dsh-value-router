@@ -25,9 +25,8 @@ import type {
   SessionOverrideConfig,
   ValueRouterConfig,
 } from './config.ts'
-import { isCompleteModelRoute, resolveEffectiveConfig, sanitizeExecutor } from './config.ts'
+import { isCompleteModelRoute, resolveEffectiveConfig, routableLines, routeKey, sanitizeExecutor } from './config.ts'
 import type { ChildRouteIntent } from './state.ts'
-import { routeKey } from './state.ts'
 
 /** 跳过路由的原因（用于日志与遥测）。 */
 export type RouteSkipReason =
@@ -102,7 +101,10 @@ export function pickOverride(
 }
 
 /**
- * 选目标线路：池非空则按序号轮转，否则用兜底线路。
+ * 选目标线路：在**白名单放行**的池条目里按序号轮转，池空则用兜底线路。
+ *
+ * 被宿主白名单挡掉的池条目不参与轮转——这就是「不与白名单冲突」的落点：
+ * 主控在提示词里看不到它们，也不会去指定它们，插件也不会派它们。
  *
  * 轮转序号在会话首次观察时分配一次并固定（见 state.rotationIndexOf），
  * 因此同一子会话的多 step 请求永远落在同一条线上。
@@ -112,9 +114,10 @@ export function pickTargetRoute(
   executor: ResolvedModelRoute,
   rotationIndex: number,
 ): { route: ResolvedPoolLine | ResolvedModelRoute; source: 'pool' | 'fallback' } {
-  if (pool.length > 0) {
-    const index = ((rotationIndex % pool.length) + pool.length) % pool.length
-    return { route: pool[index]!, source: 'pool' }
+  const usable = routableLines(pool)
+  if (usable.length > 0) {
+    const index = ((rotationIndex % usable.length) + usable.length) % usable.length
+    return { route: usable[index]!, source: 'pool' }
   }
   return { route: executor, source: 'fallback' }
 }
@@ -148,7 +151,7 @@ export function decideSubagentRoute(input: RouteDecisionInput): RouteDecision {
   // 永不接管主模型：只有子代理会话被改写。**第一位**，任何配置都不可绕过。
   if (input.origin !== 'subagent') return { route: false, reason: 'not-subagent' }
 
-  const hasPool = effective.pool.length > 0
+  const hasPool = routableLines(effective.pool).length > 0
   const hasFallback = isCompleteModelRoute(executor)
   if (!hasPool && !hasFallback) return { route: false, reason: 'no-target' }
 

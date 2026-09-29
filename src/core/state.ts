@@ -13,6 +13,10 @@
  */
 
 import type { SessionOverrideConfig } from './config.ts'
+import { routeKey } from './config.ts'
+
+/** 线路键转出，供既有从 state.ts 导入的调用方使用（定义在 config.ts）。 */
+export { routeKey }
 
 export interface SessionValueRouterMetrics {
   executorCalls: number
@@ -53,11 +57,6 @@ export interface ChildRouteIntent {
    * 拿不到真实首请求（next() 此时已是 logged header），只能当近似用。
    */
   readonly source: 'first-seen' | 'restored'
-}
-
-/** 线路的 'provider/model' 归一化键。 */
-export function routeKey(provider: string, model: string): string {
-  return `${provider}/${model}`
 }
 
 function emptyMetrics(): SessionValueRouterMetrics {

@@ -22,7 +22,7 @@ import type {
   ValueRouterConfig,
   ValueRouterStrategy,
 } from '../core/config.ts'
-import { isCompleteModelRoute, resolveEffectiveConfig, strategyLabel } from '../core/config.ts'
+import { isCompleteModelRoute, resolveEffectiveConfig, routableLines, strategyLabel } from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
 import { useValueRouterConfig } from './useValueRouterConfig.ts'
 import { useLiveSessionMetrics, useLiveStatus, writeSessionOverride } from './use-live-status.ts'
@@ -89,7 +89,8 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const sessionOverride = liveMetrics?.override ?? null
   const resolved = resolveEffectiveConfig(liveConfig, sessionOverride ?? undefined)
   const fallbackComplete = isCompleteModelRoute(resolved.executor)
-  const poolSize = resolved.pool.length
+  const poolSize = routableLines(resolved.pool).length
+  const blockedSize = resolved.pool.length - poolSize
   const configured = poolSize > 0 || fallbackComplete
 
   useEffect(() => {
@@ -301,7 +302,10 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         <div className={styles.popoverItem}>
           <span className={styles.popoverItemLabel}>轮转池:</span>
           <span className={styles.popoverItemValue}>
-            {poolSize > 0 ? resolved.pool.map((line) => line.model).join(' → ') : '未配置（子代理将继承主模型）'}
+            {poolSize > 0
+              ? routableLines(resolved.pool).map((line) => `${line.provider}/${line.model}`).join(' → ')
+              : '无可用线路（子代理将继承主模型）'}
+            {blockedSize > 0 ? `（另有 ${blockedSize} 条被宿主白名单挡住）` : ''}
           </span>
         </div>
         <div className={styles.popoverItem}>

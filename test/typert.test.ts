@@ -137,10 +137,11 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   const full = {
     enabled: true,
     strategy: 'balanced',
-    pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap' }],
+    pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap', allowed: true }],
     executor: { provider: 'p', model: 'm', reasoningEffort: '' },
     executorStatus: 'active',
     executorCallsTotal: 0,
+    allowlistKnown: true,
   }
   assert.equal(result.safeParse(full).success, true, '快照最小形状必须能通过 strict codec')
   // executorReason 是唯一的可选键：给出时也必须通过
@@ -156,9 +157,15 @@ test('status 结果的完整形状可通过校验（与 snapshot() 的键集一�
   // 枚举值必须落在声明的取值内
   assert.equal(result.safeParse({ ...full, executorStatus: 'up' }).success, false, '非法 executorStatus 应被拒绝')
   assert.equal(
-    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'ultra' }] }).success,
+    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'ultra', allowed: true }] }).success,
     false,
     '非法 tier 应被拒绝',
+  )
+  // 缺 allowed 会被 strict 拒绝：客户端必须知道这条线路会不会被派发
+  assert.equal(
+    result.safeParse({ ...full, pool: [{ provider: 'p', model: 'm', reasoningEffort: '', tier: 'cheap' }] }).success,
+    false,
+    '缺 allowed 应被拒绝',
   )
 })
 

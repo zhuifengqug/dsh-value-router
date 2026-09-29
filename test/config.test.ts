@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import {
   DEFAULT_AMBIGUOUS_POLICY,
   DEFAULT_CONFIG,
-  POOL_MAX_LINES,
+  applyAllowlist,
   formatModelRoute,
   isCompleteModelRoute,
   normalizeSessionOverride,
@@ -16,6 +16,7 @@ import {
   resolveEffectiveConfig,
   resolvePool,
   resolveSessionConfig,
+  routableLines,
   sanitizeExecutor,
   strategyLabel,
   tierLabel,
@@ -76,8 +77,8 @@ test('resolvePool：正常线路 trim 并补空 reasoningEffort / 默认 mid 档
     { provider: 'p2', model: 'm2', tier: 'strong' },
   ])
   assert.deepEqual(pool, [
-    { provider: 'p1', model: 'm1', reasoningEffort: 'low', tier: 'mid' },
-    { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong' },
+    { provider: 'p1', model: 'm1', reasoningEffort: 'low', tier: 'mid', allowed: true },
+    { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong', allowed: true },
   ])
 })
 
@@ -94,14 +95,79 @@ test('resolvePool：单项非法只丢这一项，不整池丢弃', () => {
   assert.equal(pool[1]?.tier, 'mid', '非法 tier 回落到中性档')
 })
 
-test('resolvePool：超过上限时截断，保留靠前的线路', () => {
-  const many = Array.from({ length: POOL_MAX_LINES + 3 }, (_, i) => ({
-    provider: `p${i}`, model: `m${i}`, tier: 'mid' as const,
+test('resolvePool：每条线路默认 allowed=true（白名单闸门在 applyAllowlist 里做）', () => {
+  const pool = resolvePool([{ provider: 'p1', model: 'm1', tier: 'cheap' }])
+  assert.equal(pool[0]?.allowed, true)
+})
+
+test('resolvePool：没有条数上限——订阅分散在多家 provider 是常态', () => {
+  // 用户的现实是同一个模型在多家 provider 各放一条，用轮转把额度摊开；
+  // 曾经有个 4 条的硬上限，那是按「模型很多」的误解设的，已移除。
+  const many = Array.from({ length: 12 }, (_, i) => ({
+    provider: `p${i}`, model: 'same-model', tier: 'mid' as const,
   }))
-  const pool = resolvePool(many)
-  assert.equal(pool.length, POOL_MAX_LINES)
-  assert.equal(pool[0]?.provider, 'p0')
-  assert.equal(pool[pool.length - 1]?.provider, `p${POOL_MAX_LINES - 1}`)
+  assert.equal(resolvePool(many).length, 12)
+})
+
+// —— 宿主白名单闸门 ——
+
+const ALLOWLIST = [
+  { provider: 'hetu', model: 'deepseek-v4.1-flash' },
+  { provider: 'commandcode', model: 'z-ai/glm-5.3-flash' },
+]
+
+test('applyAllowlist：只有白名单内的线路被放行，其余标记为 allowed=false', () => {
+  const config = resolveConfig({
+    pool: [
+      { provider: 'hetu', model: 'deepseek-v4.1-flash', tier: 'cheap' },
+      { provider: 'commandcode', model: 'z-ai/glm-5.3-flash', tier: 'strong' },
+      { provider: 'commandcode', model: 'Qwen/Qwen3.8-Flash', tier: 'mid' },
+    ],
+  })
+  const gated = applyAllowlist(config, ALLOWLIST)
+  assert.deepEqual(gated.pool.map(line => line.allowed), [true, true, false])
+  // 只有放行的两条参与轮转
+  assert.equal(routableLines(gated.pool).length, 2)
+  // 原始配置不被就地修改
+  assert.equal(config.pool[2]?.allowed, true)
+})
+
+test('applyAllowlist：同一个模型在多家 provider 各一条，可分别放行', () => {
+  const config = resolveConfig({
+    pool: [
+      { provider: 'hetu', model: 'deepseek-v4.1-flash', tier: 'cheap' },
+      { provider: 'xiaomi-token-plan-cn', model: 'deepseek-v4.1-flash', tier: 'cheap' },
+    ],
+  })
+  const gated = applyAllowlist(config, [{ provider: 'hetu', model: 'deepseek-v4.1-flash' }])
+  assert.deepEqual(gated.pool.map(line => line.allowed), [true, false], '比对是 provider+model 精确匹配')
+})
+
+test('applyAllowlist：读不到白名单时全部放行（宁可多派也不静默清空通道）', () => {
+  const config = resolveConfig({ pool: [{ provider: 'p', model: 'm', tier: 'mid' }] })
+  const gated = applyAllowlist(config, undefined)
+  assert.equal(gated.pool[0]?.allowed, true)
+  assert.equal(routableLines(gated.pool).length, 1)
+})
+
+test('applyAllowlist：白名单为空数组 = 全部挡掉（宿主确实一条都没授权）', () => {
+  const config = resolveConfig({ pool: [{ provider: 'p', model: 'm', tier: 'mid' }] })
+  const gated = applyAllowlist(config, [])
+  assert.equal(gated.pool[0]?.allowed, false)
+  assert.equal(routableLines(gated.pool).length, 0)
+})
+
+test('routableLines：保序，轮转顺序等于列表顺序', () => {
+  const pool = resolvePool([
+    { provider: 'a', model: 'm', tier: 'mid' },
+    { provider: 'b', model: 'm', tier: 'mid' },
+    { provider: 'c', model: 'm', tier: 'mid' },
+  ])
+  const gated = applyAllowlist(resolveConfig({ pool }), [
+    { provider: 'b', model: 'm' },
+    { provider: 'a', model: 'm' },
+  ])
+  assert.deepEqual(routableLines(gated.pool).map(line => line.provider), ['a', 'b'])
 })
 
 test('resolvePool：非数组一律回落空池', () => {

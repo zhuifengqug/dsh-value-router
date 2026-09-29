@@ -28,6 +28,7 @@ export interface ValueRouterPoolLineView {
   model: string
   reasoningEffort: string
   tier: 'cheap' | 'mid' | 'strong'
+  allowed: boolean
 }
 
 export interface ValueRouterStatusView {
@@ -38,6 +39,7 @@ export interface ValueRouterStatusView {
   executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
   executorReason?: string
   executorCallsTotal: number
+  allowlistKnown: boolean
 }
 
 /** 会话计量线上形状（src/status-controller.ts 的 SessionMetricsWire 镜像）。 */
@@ -156,6 +158,7 @@ function asPoolLine(value: unknown): ValueRouterPoolLineView | undefined {
     model: raw.model,
     reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
     tier: oneOf(raw.tier, ['cheap', 'mid', 'strong'] as const, 'mid'),
+    allowed: raw.allowed !== false,
   }
 }
 
@@ -174,6 +177,7 @@ function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
     executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),
     ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),
     executorCallsTotal: num(raw.executorCallsTotal),
+    allowlistKnown: raw.allowlistKnown !== false,
   }
 }
 

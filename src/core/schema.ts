@@ -15,7 +15,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import type { PoolLine, ValueRouterConfig } from './config.ts'
-import { DEFAULT_AMBIGUOUS_POLICY, DEFAULT_CONFIG, DEFAULT_STRATEGY, POOL_MAX_LINES } from './config.ts'
+import { DEFAULT_AMBIGUOUS_POLICY, DEFAULT_CONFIG, DEFAULT_STRATEGY } from './config.ts'
 
 /** 兜底线路 schema。 */
 const ModelRouteSchema = z.object({
@@ -24,7 +24,7 @@ const ModelRouteSchema = z.object({
   reasoningEffort: z.string().default(''),
 })
 
-/** 轮转池内单条线路 schema。 */
+/** 轮转池内单条线路 schema。**不设条数上限**——订阅分散在多家 provider 是常态。 */
 const PoolLineSchema = z.object({
   provider: z.string().default(''),
   model: z.string().default(''),
@@ -35,8 +35,7 @@ const PoolLineSchema = z.object({
 export const Config: z<ValueRouterConfig> = z.object({
   enabled: z.boolean().default(DEFAULT_CONFIG.enabled),
   strategy: z.union(['saver', 'balanced', 'powerful']).default(DEFAULT_STRATEGY),
-  // 上限在 resolvePool 里再兜一次（手改 settings 文件也能生效），这里只是给 GUI 一个提示。
-  pool: z.array(PoolLineSchema).default([] as PoolLine[]).max(POOL_MAX_LINES),
+  pool: z.array(PoolLineSchema).default([] as PoolLine[]),
   executor: ModelRouteSchema,
   ambiguousPolicy: z.union(['rotate', 'respect']).default(DEFAULT_AMBIGUOUS_POLICY),
 })

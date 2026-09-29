@@ -61,11 +61,13 @@ const statusResultSchema = z.object({
     model: z.string(),
     reasoningEffort: z.string(),
     tier: z.enum(['cheap', 'mid', 'strong']),
+    allowed: z.boolean(),
   }).strict()),
   executor: routeSelectionSchema,
   executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
   executorReason: z.string().optional(),
   executorCallsTotal: z.number().int().nonnegative(),
+  allowlistKnown: z.boolean(),
 }).strict()
 
 const sessionMetricsSchema = z.object({

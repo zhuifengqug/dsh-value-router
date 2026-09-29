@@ -10,8 +10,8 @@ import { VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER, buildSystemPromp
 
 const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
 const POOL = [
-  { provider: 'p1', model: 'cheap-model', tier: 'cheap' as const },
-  { provider: 'p2', model: 'strong-model', tier: 'strong' as const },
+  { provider: 'p1', model: 'cheap-model', tier: 'cheap' as const, allowed: true },
+  { provider: 'p2', model: 'strong-model', tier: 'strong' as const, allowed: true },
 ]
 
 /**
@@ -79,8 +79,27 @@ test('池为空时整段省略：不能向模型承诺不存在的围栏', () =>
   assert.match(text, /deepseek\/deepseek-chat/)
 })
 
-test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {
-  const text = buildSystemPromptGuidance(
+test('白名单闸门：被挡住的线路不出现在提示词里，并显式告知主控', () => {
+  const text = buildSystemPromptGuidance(resolveConfig({
+    executor: FALLBACK,
+    pool: [...POOL, { provider: 'blocked', model: 'nope', tier: 'mid', allowed: false }],
+  }), { role: 'controller' })
+  assert.match(text, /p1\/cheap-model/)
+  assert.doesNotMatch(text, /blocked\/nope/, '被挡线路绝不能出现在清单里，否则主控会去指定它')
+  assert.match(text, /另有 1 条线路被宿主白名单挡住/)
+  assert.match(text, /不要指定/)
+})
+
+test('白名单闸门：全部被挡时整段省略（不能承诺不存在的围栏）', () => {
+  const text = buildSystemPromptGuidance(resolveConfig({
+    executor: FALLBACK,
+    pool: POOL.map(line => ({ ...line, allowed: false })),
+  }), { role: 'controller' })
+  assert.doesNotMatch(text, /线路池/)
+  assert.match(text, /兜底线路/)
+})
+
+test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {  const text = buildSystemPromptGuidance(
     resolveConfig({ executor: FALLBACK, pool: POOL }),
     { role: 'controller' },
   )

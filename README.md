@@ -28,7 +28,7 @@ DSH 会话内的**成本感知 + 多模型协作层**。主模型（你在会话
   直接让整批子任务失败。
 
 轮转同时解决这两点：**第 1 个子代理走池[0]，第 2 个走池[1]，第 3 个走池[0]…**
-并行批次天然落在不同模型上，限流也被摊开。
+并行批次天然落在不同线路/供应商上，限流与订阅额度也被摊开。
 
 ### 轮转序号是每会话一次，不是每请求递增
 
@@ -55,22 +55,43 @@ DSH 会话内的**成本感知 + 多模型协作层**。主模型（你在会话
 value-router:
   enabled: true                    # 总开关
   strategy: balanced               # 派发倾向：saver | balanced | powerful
-  pool:                            # 轮转线路池，最多 4 条
-    - provider: hetu
+  pool:                            # 轮转线路池，不限条数
+    - provider: hetu               # 顺序 = 轮转顺序 = 优先级
       model: deepseek-v4.1-flash
       tier: cheap                  # cheap | mid | strong（仅用于文案与 UI，不参与路由）
     - provider: commandcode
+      model: deepseek-v4.1-flash   # 同一个模型换一家 provider = 换一份订阅额度
+      tier: cheap
+    - provider: commandcode
       model: z-ai/glm-5.3-flash
       tier: mid
-    - provider: commandcode
-      model: stealth/space-bunny-alpha
+    - provider: xiaomi-token-plan-cn
+      model: mimo-v2.6-flash
       tier: strong
-  executor:                        # 兜底线路：池为空 / 目标 provider 不可用时
+  executor:                        # 兜底线路：无可轮转线路时
     provider: hetu
     model: deepseek-v4.1-flash
     reasoningEffort: ''
   ambiguousPolicy: rotate           # rotate | respect，默认 rotate
 ```
+
+**列表顺序就是轮转顺序**：第 N 个子代理拿第 N 条，取模循环。想优先用哪家的额度就排在前面。
+**不限条数**——你的现实是订阅分散在多家 provider，同一个模型在多家各放一条正是轮转的用法。
+
+### 宿主白名单是唯一真源
+
+插件在 host 侧读 `ctx.subagentModelSelection.current()` 的 `allowedModels`（宿主
+`subagent-model-selection-settings`），**不在白名单里的池条目**会被：
+
+1. 从**轮转**中排除（不会被派发）；
+2. 从**给主控的提示词清单**中排除（主控看不到，就不会去指定）。
+
+这堵死了唯一的真实冲突路径：主控显式指定一条宿主拒绝的线路 → 宿主抛
+`gateway/bad-request`，该次工具调用失败。设置卡会把这些条目标成
+「不在宿主白名单，不会被派发」。
+
+读不到白名单时（宿主没挂载该服务 / 更老的宿主）**全部放行**——宁可多派，
+也不把通道静默清空。
 
 ### 为什么 `executor` 不能删
 
@@ -135,14 +156,14 @@ value-router:
 
 宿主自带子代理模型白名单（`subagent-model-selection-settings.allowedModels`），
 语义是**授权**："子代理*可以*用哪些模型"。本插件的 `pool` 语义是**路由**："该派谁"。
-两者是**两份独立配置**，不会自动同步，但**时序不同所以不会打架**：
 
-- 宿主在子代理**创建前**校验工具参数（`assertAllowedModelSelection`）；
-- 插件在**创建后**的 `agent/request` 改写，宿主根本看不到插件选的线路。
+时序上它们本来不会打架——宿主在子代理**创建前**校验主控显式传入的参数，插件在
+**创建后**的 `agent/request` 改写，宿主看不到插件选的线路。但"时序不同"只是解释了
+为什么不会崩，并不等于不会**咬人**：主控显式指定一条宿主不认的线路，那次工具调用
+就会失败。
 
-最坏情况：主控显式指定了宿主白名单外的线路 → 宿主抛 `gateway/bad-request`，
-该次工具调用失败。提示词里已明确"只能从清单里挑"来降低发生率。
-若你希望插件只使用宿主放行的线路，把两者配成一致的子集即可。
+所以 0.2.0 让插件**主动读同一份名单当闸门**（见 §2）：池是白名单的子集时，
+两条路径都不会被触发。**配置建议：把你想用的线路同时加进宿主白名单和插件池。**
 
 ## 6. 安装
 

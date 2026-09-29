@@ -18,8 +18,8 @@ import type { ValueRouterConfig } from '../src/core/config.ts'
 
 const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
 const POOL = [
-  { provider: 'p1', model: 'm1', reasoningEffort: '', tier: 'cheap' as const },
-  { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong' as const },
+  { provider: 'p1', model: 'm1', reasoningEffort: '', tier: 'cheap' as const, allowed: true },
+  { provider: 'p2', model: 'm2', reasoningEffort: '', tier: 'strong' as const, allowed: true },
 ]
 
 function config(overrides: Partial<ValueRouterConfig> = {}): Partial<ValueRouterConfig> {
@@ -88,6 +88,39 @@ test('pickTargetRoute：池为空时用兜底线路', () => {
     pickTargetRoute(POOL, FALLBACK, 3),
     { route: POOL[1]!, source: 'pool' },
   )
+})
+
+test('白名单闸门：被挡住的线路不参与轮转，序号只在放行线路上循环', () => {
+  const gated = [
+    { ...POOL[0]!, allowed: false },
+    { ...POOL[1]!, allowed: true },
+  ]
+  // 只有 p2 放行 → 无论序号是多少都落到 p2
+  for (const index of [0, 1, 2, 3]) {
+    assert.deepEqual(pickTargetRoute(gated, FALLBACK, index), { route: POOL[1]!, source: 'pool' })
+  }
+})
+
+test('白名单闸门：全部被挡时回落到兜底线路', () => {
+  const blocked = POOL.map(line => ({ ...line, allowed: false }))
+  assert.deepEqual(pickTargetRoute(blocked, FALLBACK, 0), { route: FALLBACK, source: 'fallback' })
+})
+
+test('白名单闸门：池全被挡 + 兜底未配置 → 无处可派', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: { enabled: true, strategy: 'balanced', pool: POOL.map(line => ({ ...line, allowed: false })) },
+  }))
+  assert.deepEqual(decision, { route: false, reason: 'no-target' })
+})
+
+test('白名单闸门：池全被挡但兜底可用 → 走兜底', () => {
+  const decision = decideSubagentRoute(input({
+    globalConfig: config({ pool: POOL.map(line => ({ ...line, allowed: false })) }),
+  }))
+  assert.equal(decision.route, true)
+  if (!decision.route) return
+  assert.equal(decision.provider, 'deepseek')
+  assert.equal(decision.source, 'fallback')
 })
 
 // —— B+1：尊重主控显式指定 ——

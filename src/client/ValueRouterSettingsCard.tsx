@@ -14,14 +14,15 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {
   ModelRouteSelection,
   PoolLine,
+  ResolvedPoolLine,
   ValueRouterConfig,
   ValueRouterStrategy,
   ValueRouterTier,
 } from '../core/config.ts'
 import {
-  POOL_MAX_LINES,
   isCompleteModelRoute,
   resolveEffectiveConfig,
+  routableLines,
   strategyLabel,
   tierLabel,
 } from '../core/config.ts'
@@ -83,15 +84,18 @@ const SelectField: React.FC<SelectFieldProps> = ({ label, value, options, onComm
   </div>
 )
 
-/** 把会话内即将出现的线路顺序摊开给用户看——轮转是可预测的，值得明示。 */
-function rotationPreview(pool: readonly PoolLine[], samples = 4): string {
-  if (pool.length === 0) return ''
+/**
+ * 把会话内即将出现的线路顺序摊开给用户看——轮转是可预测的，值得明示。
+ * 只列白名单放行的线路：被挡住的那些根本不会被派发。
+ */
+function rotationPreview(pool: readonly ResolvedPoolLine[], samples = 6): string {
+  const usable = routableLines(pool)
+  if (usable.length === 0) return ''
   return Array.from({ length: samples }, (_, index) => {
-    const line = pool[index % pool.length]!
-    return `${index + 1}→${line.model}`
+    const line = usable[index % usable.length]!
+    return `${index + 1}→${line.provider}/${line.model}`
   }).join('  ')
 }
-
 export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = ({
   config,
   configForm,
@@ -110,7 +114,7 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
   const [saveError, setSaveError] = useState<string | null>(null)
   const liveStatus = useLiveStatus(clientCtx, true)
 
-  const preview = useMemo(() => rotationPreview(pool), [pool])
+  const preview = useMemo(() => rotationPreview(liveStatus?.pool ?? pool), [liveStatus?.pool, pool])
 
   // —— 写入 ——
   const persist = useCallback((patch: Partial<ValueRouterConfig>): void => {
@@ -138,7 +142,6 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
   const commitPool = (next: PoolLine[]): void => persist({ pool: next })
 
   const handleAddLine = (): void => {
-    if (pool.length >= POOL_MAX_LINES) return
     commitPool([...pool, { provider: '', model: '', reasoningEffort: '', tier: 'mid' }])
   }
 
@@ -214,11 +217,17 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
         ) : (
           pool.map((line, index) => {
             const complete = isCompleteModelRoute(line)
+            // allowed 由宿主白名单在 host 侧推导；读不到白名单时全为 true。
+            const live = liveStatus?.pool[index]
+            const allowed = live?.allowed ?? line.allowed ?? true
             return (
               <div key={index} className={styles.fieldRow} data-value-router-pool-line={String(index)}>
                 <span className={styles.fieldLabel}>
                   线路 {index + 1}
-                  <span className={styles.fieldHint}>{line.provider ? `${line.provider} / ` : ''}{line.model || '未选择模型'}</span>
+                  <span className={styles.fieldHint}>
+                    {line.provider ? `${line.provider} / ` : ''}{line.model || '未选择模型'}
+                    {allowed ? '' : ' · 不在宿主白名单，不会被派发'}
+                  </span>
                 </span>
                 <div className={styles.strategyGroup}>
                   <button
@@ -268,19 +277,19 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
           <button
             type="button"
             className={`${styles.button} ${styles.buttonPrimary}`}
-            disabled={pool.length >= POOL_MAX_LINES}
             onClick={handleAddLine}
           >
-            {pool.length >= POOL_MAX_LINES ? `已达上限（${POOL_MAX_LINES} 条）` : '添加线路'}
+            添加线路
           </button>
           <span className={styles.fieldHint}>
-            最多 {POOL_MAX_LINES} 条；多样性收益在 3-4 条饱和。档位只影响给主控的提示文案与这里的排序，不参与路由判据。
+            不限条数。列表顺序就是轮转顺序（第 N 个子代理拿第 N 条，取模循环）——把想优先用的供应商排在前面。
+            同一个模型可以在多家 provider 各放一条，用来把订阅额度摊开。档位只影响给主控的提示文案，不参与路由判据。
           </span>
         </div>
 
         {preview && (
           <div className={styles.fieldHint} role="status">
-            轮转顺序（前 4 个子代理）：{preview}
+            轮转顺序（前 6 个子代理）：{preview}
           </div>
         )}
       </div>

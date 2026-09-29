@@ -58,8 +58,9 @@ export const zh = {
   poolTierCheap: '省',
   poolTierMid: '中',
   poolTierStrong: '强',
-  poolMaxHint: '最多 4 条；多样性收益在 3-4 条饱和。档位只影响给主控的提示文案，不参与路由判据。',
-  poolPreview: '轮转顺序（前 4 个子代理）',
+  poolMaxHint: '不限条数。列表顺序就是轮转顺序（第 N 个子代理拿第 N 条，取模循环）——把想优先用的供应商排在前面。同一个模型可以在多家 provider 各放一条，用来把订阅额度摊开。档位只影响给主控的提示文案，不参与路由判据。',
+  poolPreview: '轮转顺序（前 6 个子代理）',
+  poolBlocked: '不在宿主白名单，不会被派发',
   fallback: '兜底线路',
   fallbackDesc: '只在轮转池为空、或池中目标线路的 provider 不可用时才用。宿主本身不提供默认线路——没有它，子代理会直接继承主模型。',
 
@@ -146,8 +147,9 @@ export const en: Record<ValueRouterLocaleKey, string> = {
   poolTierCheap: 'Cheap',
   poolTierMid: 'Mid',
   poolTierStrong: 'Strong',
-  poolMaxHint: 'Up to 4 routes; diversity saturates around 3-4. Tiers only shape the prompt shown to the controller — they are not routing criteria.',
-  poolPreview: 'Rotation order (first 4 subagents)',
+  poolMaxHint: 'No limit on the number of routes. List order is the rotation order (subagent N takes route N, wrapping around) — put the providers you want to favour first. The same model can appear under several providers to spread subscription quota. Tiers only shape the prompt shown to the controller.',
+  poolPreview: 'Rotation order (first 6 subagents)',
+  poolBlocked: 'Not in the host allowlist; never dispatched',
   fallback: 'Fallback Route',
   fallbackDesc: 'Used only when the pool is empty or the selected route provider is unavailable. The host provides no default route — without one, subagents inherit the primary model directly.',
 
