@@ -282,8 +282,16 @@ function unchanged(previous: unknown, next: unknown): boolean {
 /**
  * 订阅宿主只读状态快照（顶栏气泡 / 设置卡打开时轮询；关闭即停）。
  */
-export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueRouterStatusView | undefined {
+/** 状态通道的读取结果：数据 + 上一次的失败原因。 */
+export interface LiveStatusResult {
+  data: ValueRouterStatusView | undefined
+  /** 最近一次读取失败的原因；成功读取后清空。用于在界面上说清"为什么没有数据"。 */
+  error: string | undefined
+}
+
+export function useLiveStatus(ctx: Context | undefined, active: boolean): LiveStatusResult {
   const [status, setStatus] = useState<ValueRouterStatusView | undefined>(undefined)
+  const [error, setError] = useState<string | undefined>(undefined)
   const faceRef = useRef<ValueRouterRemoteFace | null>(null)
 
   useEffect(() => {
@@ -296,14 +304,22 @@ export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueR
         const raw = await face.status({})
         if (disposed) return
         const parsed = asStatusSnapshot(unwrapEnvelope(raw))
-        if (parsed) setStatus((previous) => (unchanged(previous, parsed) ? previous : parsed))
-      } catch {
-        // 通道抖动时保持旧值，下次轮询再试。
+        if (parsed) {
+          setStatus((previous) => (unchanged(previous, parsed) ? previous : parsed))
+          setError(undefined)
+        } else {
+          // 有响应但形状不对：也要说出来，否则界面只能显示"空"，看不出是断线还是数据异常
+          setError('宿主返回的状态形状无法识别')
+        }
+      } catch (cause) {
+        if (disposed) return
+        setError(cause instanceof Error ? cause.message : String(cause))
       }
     }
     void mountRemote(ctx).then((face) => {
       if (disposed) return
       faceRef.current = face ?? null
+      if (face === null) setError('Remote 通道挂载失败')
       void read()
     })
     const timer = setInterval(() => { void read() }, 4000)
@@ -311,7 +327,7 @@ export function useLiveStatus(ctx: Context | undefined, active: boolean): ValueR
     return () => { disposed = true; clearInterval(timer) }
   }, [ctx, active])
 
-  return status
+  return { data: status, error }
 }
 
 /**

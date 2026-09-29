@@ -84,7 +84,9 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
   const overrideRef = useRef<SessionOverrideConfig | null>(null)
 
   const liveConfig = useValueRouterConfig(configForm, config)
-  const liveStatus = useLiveStatus(clientCtx, open)
+  const liveStatusResult = useLiveStatus(clientCtx, open)
+  const liveStatus = liveStatusResult.data
+  const liveStatusError = liveStatusResult.error
   const liveMetrics = useLiveSessionMetrics(clientCtx, sessionId, open, metricsToken)
   const sessionOverride = liveMetrics?.override ?? null
   const resolved = resolveEffectiveConfig(liveConfig, sessionOverride ?? undefined)
@@ -348,31 +350,42 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         **空态必须渲染**：曾经用 `length > 0` 才渲染，结果「还没有派发」和
         「这个功能不存在」在界面上完全一样——功能缺了却看不出来，这是设计错误。
       */}
-      {liveStatus && (
-        <div className={styles.dispatchLog}>
-          <div className={styles.dispatchLogHead}>
-            本会话派发
-            {sessionDispatches.length > 0 && `（${sessionDispatches.length}）`}
-          </div>
-          {sessionDispatches.length === 0 ? (
-            <div className={styles.dispatchEmpty}>
-              这个会话还没有派发过子代理。派发后这里会显示它实际跑在哪个模型上。
-            </div>
-          ) : (
-            sessionDispatches.map((record, index) => (
-              <div key={index} className={styles.dispatchRow}>
-                <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
-                  {record.model}
-                </span>
-                <span className={styles.dispatchProvider}>{record.provider}</span>
-                <span className={styles.dispatchOrigin}>
-                  {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
-                </span>
-              </div>
-            ))
-          )}
+      {/*
+        派发记录——「插件到底干了什么」的唯一可观测出口。
+        子代理会话头和 subagent 工具的返回都不带模型信息，所以主控和用户在对话里
+        无法验证轮转是否真的生效；这张表就是验收依据。
+
+        **永远渲染**：曾经用 `length > 0` 才渲染，结果「还没派发」和「功能不存在」
+        在界面上完全一样；后来又用 `liveStatus &&` 包了一层，于是**状态通道一断，
+        整块连同原因一起消失**——用户只会说「哪有」。两种情况都要说出来。
+      */}
+      <div className={styles.dispatchLog}>
+        <div className={styles.dispatchLogHead}>
+          本会话派发
+          {liveStatus && sessionDispatches.length > 0 && `（${sessionDispatches.length}）`}
         </div>
-      )}
+        {liveStatusError !== undefined ? (
+          <div className={styles.dispatchEmpty}>状态通道没连上：{liveStatusError}</div>
+        ) : liveStatus === undefined ? (
+          <div className={styles.dispatchEmpty}>正在连接宿主状态通道…</div>
+        ) : sessionDispatches.length === 0 ? (
+          <div className={styles.dispatchEmpty}>
+            这个会话还没有派发过子代理。派发后这里会显示它实际跑在哪个模型上。
+          </div>
+        ) : (
+          sessionDispatches.map((record, index) => (
+            <div key={index} className={styles.dispatchRow}>
+              <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
+                {record.model}
+              </span>
+              <span className={styles.dispatchProvider}>{record.provider}</span>
+              <span className={styles.dispatchOrigin}>
+                {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
 
       <div className={styles.statsCard}>
         <div className={styles.statItem}>

@@ -136,7 +136,9 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
    * 其余折叠成一行摘要——档位多起来时全展开会淹没设置面板。
    */
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
-  const liveStatus = useLiveStatus(clientCtx, true)
+  const liveStatusResult = useLiveStatus(clientCtx, true)
+  const liveStatus = liveStatusResult.data
+  const liveStatusError = liveStatusResult.error
 
   const liveTiers = liveStatus?.tiers ?? tierList
   const isCollapsed = (id: string, index: number): boolean =>
@@ -452,18 +454,22 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
 
         <RotationStrip pool={liveTiers[0]?.pool ?? []} />
 
-        {/* 派发记录也放在设置卡里：验收时不必只盯着顶栏气泡。 */}
+        {/* 派发记录也放在设置卡里：验收时不必只盯着顶栏气泡。空态/断线都写出来。 */}
         <div className={styles.dispatchLog}>
           <div className={styles.dispatchLogHead}>
-            最近派发
-            {(liveStatus?.recentDispatches.length ?? 0) > 0 && `（${liveStatus?.recentDispatches.length}）`}
+            最近派发（全部会话）
+            {liveStatus && liveStatus.recentDispatches.length > 0 && `（${liveStatus.recentDispatches.length}）`}
           </div>
-          {(liveStatus?.recentDispatches.length ?? 0) === 0 ? (
+          {liveStatusError !== undefined ? (
+            <div className={styles.dispatchEmpty}>状态通道没连上：{liveStatusError}</div>
+          ) : liveStatus === undefined ? (
+            <div className={styles.dispatchEmpty}>正在连接宿主状态通道…</div>
+          ) : liveStatus.recentDispatches.length === 0 ? (
             <div className={styles.dispatchEmpty}>
               还没有派发记录。派发子代理后，这里会逐条显示它实际跑在哪个模型上。
             </div>
           ) : (
-            liveStatus!.recentDispatches.slice(0, 8).map((record, index) => (
+            liveStatus.recentDispatches.map((record, index) => (
               <div key={index} className={styles.dispatchRow}>
                 <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
                   {record.model}
