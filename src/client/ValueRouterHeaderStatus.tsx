@@ -342,21 +342,33 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         子代理会话头和 subagent 工具的返回都不带模型信息，所以主控和用户在对话里
         无法验证轮转是否真的生效；这张表就是验收依据。显示 provider + model 全名，
         否则「同一个模型挂在两家 provider」会看起来像重复。
+
+        **空态必须渲染**：曾经用 `length > 0` 才渲染，结果「还没有派发」和
+        「这个功能不存在」在界面上完全一样——功能缺了却看不出来，这是设计错误。
       */}
-      {liveStatus && liveStatus.recentDispatches.length > 0 && (
+      {liveStatus && (
         <div className={styles.dispatchLog}>
-          <div className={styles.dispatchLogHead}>最近派发</div>
-          {liveStatus.recentDispatches.slice(0, 8).map((record, index) => (
-            <div key={index} className={styles.dispatchRow}>
-              <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
-                {record.model}
-              </span>
-              <span className={styles.dispatchProvider}>{record.provider}</span>
-              <span className={styles.dispatchOrigin}>
-                {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
-              </span>
+          <div className={styles.dispatchLogHead}>
+            最近派发
+            {liveStatus.recentDispatches.length > 0 && `（${liveStatus.recentDispatches.length}）`}
+          </div>
+          {liveStatus.recentDispatches.length === 0 ? (
+            <div className={styles.dispatchEmpty}>
+              还没有派发记录。派发子代理后，这里会逐条显示它实际跑在哪个模型上。
             </div>
-          ))}
+          ) : (
+            liveStatus.recentDispatches.slice(0, 8).map((record, index) => (
+              <div key={index} className={styles.dispatchRow}>
+                <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
+                  {record.model}
+                </span>
+                <span className={styles.dispatchProvider}>{record.provider}</span>
+                <span className={styles.dispatchOrigin}>
+                  {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
+                </span>
+              </div>
+            ))
+          )}
         </div>
       )}
 

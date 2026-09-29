@@ -451,6 +451,31 @@ export const ValueRouterSettingsCard: React.FC<ValueRouterSettingsCardProps> = (
         </p>
 
         <RotationStrip pool={liveTiers[0]?.pool ?? []} />
+
+        {/* 派发记录也放在设置卡里：验收时不必只盯着顶栏气泡。 */}
+        <div className={styles.dispatchLog}>
+          <div className={styles.dispatchLogHead}>
+            最近派发
+            {(liveStatus?.recentDispatches.length ?? 0) > 0 && `（${liveStatus?.recentDispatches.length}）`}
+          </div>
+          {(liveStatus?.recentDispatches.length ?? 0) === 0 ? (
+            <div className={styles.dispatchEmpty}>
+              还没有派发记录。派发子代理后，这里会逐条显示它实际跑在哪个模型上。
+            </div>
+          ) : (
+            liveStatus!.recentDispatches.slice(0, 8).map((record, index) => (
+              <div key={index} className={styles.dispatchRow}>
+                <span className={styles.dispatchRoute} title={`${record.provider} / ${record.model}`}>
+                  {record.model}
+                </span>
+                <span className={styles.dispatchProvider}>{record.provider}</span>
+                <span className={styles.dispatchOrigin}>
+                  {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
       </div>
 
       {/* —— 兜底线路 —— */}

@@ -930,6 +930,13 @@
   color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
 }
 
+/* 空态必须画出来：「还没派发」和「功能没做」在界面上不能长得一样 */
+.dispatchEmpty {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lineActions,
   .iconBtn,
