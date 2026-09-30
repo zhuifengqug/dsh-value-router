@@ -195,7 +195,7 @@
 
 .strategyItemSelected {
   border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.08));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 8%, transparent);
 }
 
 .strategyTitle {
@@ -548,7 +548,7 @@
 }
 
 .modelOptionSelected {
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.08));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 8%, transparent);
   border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
 }
 
@@ -625,7 +625,7 @@
 .tierWarn {
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary, #9a6700);
-  background: var(--dsw-alias-state-warn-surface, rgba(245, 158, 11, 0.1));
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #9a6700) 10%, transparent);
   border-radius: 5px;
   padding: 4px 8px;
 }
@@ -804,7 +804,7 @@
 }
 
 .iconBtnDanger:hover:not(:disabled) {
-  color: var(--dsw-alias-state-danger-primary, #c0392b);
+  color: var(--dsw-alias-state-error-primary, #c0392b);
 }
 
 .linkBtn {
@@ -818,7 +818,7 @@
 }
 
 .linkBtn:hover {
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.1));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 10%, transparent);
 }
 
 .addLineBtn {
@@ -837,7 +837,7 @@
 .addLineBtn:hover {
   border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
   color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.06));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 6%, transparent);
 }
 
 .addTierBtn {
@@ -855,7 +855,7 @@
 
 .addTierBtn:hover {
   border-color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.07));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 7%, transparent);
 }
 
 .sectionNote {

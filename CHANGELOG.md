@@ -5,6 +5,69 @@
 
 ---
 
+## 0.9.0 — 2026-09-30
+
+**适配 DSH 0.2.0-rc.2**（宿主 `@deepseek-ai/dsh-desktop@0.2.0-rc.2`）。
+
+先说结论：**本插件用到的宿主契约在 rc.2 全部保持不变**，没有一处 API 破坏。
+`peerDependencies` / `devDependencies` 全部从 `0.2.0-rc.1` 提到 `0.2.0-rc.2`，
+在真实的 rc.2 类型定义下 `tsc --noEmit` 零错误、117 个测试全绿、构建通过。
+逐条核对过的契约（均**未变**）：
+
+| 契约 | rc.2 位置 | 结论 |
+| --- | --- | --- |
+| `Config` 必须从 entry 模块导出 | `dsh-settings/lib/index.js:539` | 未变 |
+| `describe()` 的 fiber 闸门 | `dsh-settings/lib/index.js:417` | 未变（仍是 `state !== 2` 跳过） |
+| `volatileForm()` 只保留 volatile 子树 | `dsh-settings/lib/index.js:122` | 未变 |
+| typert 严格编解码器必须有 `create()` 工厂 | `dsh-typert-loader/lib/index.js:211` | 未变 |
+| 子代理白名单 `subagentModelSelection.current().allowedModels` | `dsh-tool-subagent/lib/model-selection-settings.js:55` | 未变 |
+| `configEditor.entries()` | `dsh-config-editor/lib/index.js:30` | 未变 |
+| `systemPrompt.section({name, order, text})` | `dsh-system-prompt/lib/index.js:240` | 未变 |
+| 会话头 `parentSession` / `origin === 'subagent'` | `dsh-session/lib/index.js:1048-1050` | 未变 |
+| `agent/request` 瀑布改写 `provider`/`model` | `dsh-agent/lib/index.js:181` | 未变 |
+
+### Fixed
+
+- **宿主主题 token 被 rc.2 改名/删除，样式静默退化成写死颜色。**
+  rc.2 把 `state-danger-*` 整个并入 `state-error-primary`，取消了 `state-*-surface`
+  那一档，并删除了 `brand-bg-hover`。因为每处引用都带硬编码 fallback，变量失效时
+  **不报错、不闪红**，只是暗色/写死色块在浅色主题上又回来了——正是 0.8.1 修过的问题。
+  涉及 3 个 CSS 文件共 11 处：
+
+  | rc.1 | rc.2 |
+  | --- | --- |
+  | `--dsw-alias-state-danger-primary` | `--dsw-alias-state-error-primary` |
+  | `--dsw-alias-state-danger-surface` | `color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)` |
+  | `--dsw-alias-state-success-surface` | `color-mix(in srgb, var(--dsw-alias-state-success-primary) N%, transparent)` |
+  | `--dsw-alias-state-warn-surface` | `color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent)` |
+  | `--dsw-alias-brand-bg-hover` | `color-mix(in srgb, var(--dsw-alias-brand-primary) N%, transparent)` |
+
+  淡底不再另设一档 token，而是从 primary 调出来——这也正是宿主自己的写法
+  （`dsh-client-ui-theme` 内部大量使用 `color-mix(in srgb, var(--dsw-alias-…) N%, transparent)`）。
+  顺带把 `value-router-a11y.module.css` 里 `.error` 写死的 `rgba(180,35,24,…)`
+  边框/底色也换成同一套 token（它的文字色本来就已用 token，两者此前不一致）。
+
+- **`settings.configure()` 的 disposer 从未被消费。**
+  rc.2 起 `configure()` 对**同一 fiber 重复注册直接抛错**
+  （`Settings presentation is already configured for this plugin instance`），
+  且服务端的 `presentations` 这张 Map 强引用 fiber。本插件此前把返回值丢掉了，
+  于是热重载后 `presentations` 只增不减。现在把 configure 的 disposer 与条目轮询的
+  disposer 合成一个交给 `ctx.effect`，卸载时两个都跑掉。
+
+### Added
+
+- `test/theme-tokens.test.ts`：主题 token 守卫（2 个用例）。断言 CSS 不引用 rc.2
+  已删除的 token 家族，且每个 `var(--dsw-*)` 都带 fallback。这是**反向 canary**——
+  不试图证明新名一定存在（那需要把宿主样式表引进测试环境，会在每次升级时变成噪音），
+  只保证旧名不会被写回来。已验证非空测试：塞回一个坏 token 会真的失败。
+
+### 已知文档缺口
+
+本文件此前只记到 0.5.2，而包版本已到 0.8.3——0.6.x ~ 0.8.x 的变更从未补记。
+此处**不凭空追写**（无据可查的版本说明等于编造），待后续确认后再补。
+
+---
+
 ## 0.5.2 — 2026-09-29
 
 **「设置里没有卡片 + 配置不可写」的最终根因**。从 0.2.0 起就存在，此前三轮都在修表层。
@@ -308,6 +371,49 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.9.0 — 2026-09-30
+
+**Adapted to DSH 0.2.0-rc.2** (host `@deepseek-ai/dsh-desktop@0.2.0-rc.2`).
+
+Headline: **every host contract this plugin uses is unchanged in rc.2** — there is no
+API breakage to code around. `peerDependencies` / `devDependencies` moved from
+`0.2.0-rc.1` to `0.2.0-rc.2`; against the real rc.2 type definitions `tsc --noEmit`
+reports zero errors, all 117 tests pass, and the build is clean. Contracts verified
+individually (all unchanged): the `Config` entry re-export and the `describe()` fiber
+gate (`dsh-settings/lib/index.js:417,539`), `volatileForm()` (`:122`), the typert
+strict-codec `create()` factory (`dsh-typert-loader/lib/index.js:211`), the subagent
+allowlist `subagentModelSelection.current().allowedModels`
+(`dsh-tool-subagent/lib/model-selection-settings.js:55`), `configEditor.entries()`,
+`systemPrompt.section()`, the session header `parentSession` / `origin === 'subagent'`,
+and the `agent/request` waterfall rewrite.
+
+**Fixed — host theme tokens renamed or removed, styles silently fell back to hardcoded
+colors.** rc.2 folded `state-danger-*` into `state-error-primary`, dropped the
+`state-*-surface` tier, and deleted `brand-bg-hover`. Because every reference carried a
+hardcoded fallback, losing a token produces no error and no visual alarm — the dark
+blocks simply return on light themes, which is the exact problem 0.8.1 fixed. Eleven
+declarations across three CSS files were remapped; tints are now derived with
+`color-mix(in srgb, var(--dsw-alias-…-primary) N%, transparent)`, the idiom the host
+itself uses. Also replaced the hardcoded `rgba(180,35,24,…)` border/background on
+`.error` with the same tokens, for consistency with the text color that already used one.
+
+**Fixed — the `settings.configure()` disposer was never consumed.** rc.2 throws on
+re-registering the same fiber (`Settings presentation is already configured for this
+plugin instance`) and the service's `presentations` map strongly references the fiber.
+The configure disposer is now composed with the entry-watch disposer and handed to
+`ctx.effect`, so both run on unload.
+
+**Added — `test/theme-tokens.test.ts`**, a two-case guard asserting the CSS never
+references a token family rc.2 removed, and that every `var(--dsw-*)` keeps a fallback.
+It is a reverse canary: it does not try to prove the new names exist (that would mean
+pulling host stylesheets into the test environment and becoming noise on every upgrade),
+only that the old ones cannot come back. Verified non-vacuous by reintroducing a bad
+token and watching it fail.
+
+**Known documentation gap:** this file previously stopped at 0.5.2 while the package was
+already at 0.8.3, so 0.6.x – 0.8.x were never recorded. They are deliberately not
+written from memory here — an unverifiable version history would be fabrication.
 
 ## 0.5.2 — 2026-09-29
 

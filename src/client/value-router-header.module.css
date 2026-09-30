@@ -128,7 +128,7 @@
 
 .setupStepReady {
   border-color: var(--dsw-alias-state-success-primary, #0a7b4e);
-  background: var(--dsw-alias-state-success-surface, rgba(16, 185, 129, 0.1));
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #0a7b4e) 10%, transparent);
 }
 
 .setupStepNumber {
@@ -137,7 +137,7 @@
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: var(--dsw-alias-brand-bg-hover, rgba(11, 107, 203, 0.12));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #0b6bcb) 12%, transparent);
   color: var(--dsw-alias-brand-primary, var(--dsh-brand-primary, #0b6bcb));
   font-size: 10px;
   font-weight: 800;
@@ -145,7 +145,7 @@
 }
 
 .setupStepReady .setupStepNumber {
-  background: var(--dsw-alias-state-success-surface, rgba(16, 185, 129, 0.16));
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #0a7b4e) 16%, transparent);
   color: var(--dsw-alias-state-success-primary, #0a7b4e);
 }
 
@@ -216,13 +216,15 @@
   font-size: 11px;
 }
 
-/* 错误用宿主的 danger token，不用写死的暗红——浅色下暗红底是黑块。 */
+/* 错误用宿主的 error token，不用写死的暗红——浅色下暗红底是黑块。
+   0.9.0 适配 DSH 0.2.0-rc.2：宿主把 state-danger-* 整个并入 state-error-primary，
+   并且不再提供 *-surface 这一档；淡底改用 color-mix 从 primary 调出来。 */
 .setupError {
   padding: 8px 10px;
-  border: 1px solid var(--dsw-alias-state-danger-primary, #c0392b);
+  border: 1px solid var(--dsw-alias-state-error-primary, #c0392b);
   border-radius: 8px;
-  background: var(--dsw-alias-state-danger-surface, rgba(220, 38, 38, 0.1));
-  color: var(--dsw-alias-state-danger-primary, #c0392b);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #c0392b) 10%, transparent);
+  color: var(--dsw-alias-state-error-primary, #c0392b);
   font-size: 11px;
   line-height: 1.45;
 }

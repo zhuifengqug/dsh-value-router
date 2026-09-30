@@ -300,6 +300,12 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
    * SettingsForms.configure() 只声明表单策略、不接收配置回调，因此这里在
    * configure 之后按需自建监听：宿主写入（configEditor.edit → Loader 热重载）
    * 会替换条目，此时重新绑定 source 并刷新 executor 健康。
+   *
+   * 0.9.0 适配 DSH 0.2.0-rc.2：configure() 的返回值必须被消费。rc.2 起它对
+   * **同一 fiber 重复注册直接抛错**（`Settings presentation is already configured`），
+   * 且 `presentations` 这张 Map 强引用 fiber，不释放就是随热重载持续泄漏。
+   * 于是这里把 configure 的 disposer 与条目轮询的 disposer 合成一个交给 ctx.effect，
+   * 卸载时两个都跑掉；重挂时 configure 才能再次成功。
    */
   function registerSettingsSection(): (() => void) | undefined {
     try {
@@ -314,12 +320,18 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       bindConfigFromEntry()
       // auto: true 与宿主默认一致，显式写出以声明「本条目由宿主自动生成表单」；
       // 客户端 settings.plugin.item 卡片按同一 namespace 挂载。
-      settings.configure({ auto: true }, ctx.fiber)
+      const disposePresentation = settings.configure({ auto: true }, ctx.fiber)
+      const stopWatchingEntry = buildSettingsEntryWatcher()
       info(
         `value-router: settings 命名空间 "${VALUE_ROUTER_SETTINGS_NAMESPACE}" 就绪（settings.configure，条目 id 即 namespace）`,
       )
       reportSettingsSurface()
-      return buildSettingsEntryWatcher()
+      return () => {
+        // 先摘条目轮询再摘表单策略：顺序反了也不影响正确性（两者互不依赖），
+        // 但保持「先停我们自己的东西」的一致读法。
+        stopWatchingEntry()
+        if (typeof disposePresentation === 'function') disposePresentation()
+      }
     } catch (error) {
       warn(
         `value-router: 设置页注册失败（${error instanceof Error ? error.message : String(error)}）；降级为 Loader 条目配置。`,

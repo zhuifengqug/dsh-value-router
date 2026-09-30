@@ -167,8 +167,8 @@ value-router:
 
 ## 6. 安装
 
-最低宿主：**DSH 0.2.0-rc.1**（peer 范围已收窄，更早的宿主会拒绝安装或静默禁用该插件行）。
-0.2.x 需要 0.1.7-rc.2 或更新；0.3.0 需要 0.2.0-rc.1 或更新。
+最低宿主：**DSH 0.2.0-rc.2**（peer 范围已收窄，更早的宿主会拒绝安装或静默禁用该插件行）。
+0.2.x 需要 0.1.7-rc.2 或更新；0.3.0 需要 0.2.0-rc.1 或更新；0.9.0 需要 0.2.0-rc.2 或更新。
 
 ```bash
 # 开发装载（软链，改 lib/ 后重启 dsh 即生效）
@@ -217,8 +217,17 @@ git checkout v0.1.0-local && pnpm install && pnpm build
 - 安装期**不执行任何代码**（无 `postinstall` / `prepare`）。`prepublishOnly` 只在
   `npm publish` 时触发。
 
-## 9. 退役记录
+## 9. 版本适配记录
 
+- **2026-09-30（0.9.0）**：适配宿主 DSH 0.2.0-rc.2。逐条核对插件依赖的运行时契约
+  （`Config` 入口导出、`describe()` fiber 闸门、`volatileForm()`、typert `create()` 工厂、
+  `subagentModelSelection` 白名单、`configEditor.entries()`、`systemPrompt.section()`、
+  会话头 `parentSession`/`origin`、`agent/request` 瀑布）**全部未变**。实际改动两处：
+  ① 宿主把 `state-danger-*` 并入 `state-error-primary`、取消 `state-*-surface`、删除
+  `brand-bg-hover`，本插件 3 个 CSS 文件 11 处引用改为新 token 或 `color-mix` 淡底
+  （变量消失时只会静默退化成写死颜色，不会有任何报错）；② rc.2 起 `configure()` 对同一
+  fiber 重复注册会抛错，且服务端强引用 fiber——此前被丢弃的 disposer 现在与条目轮询的
+  disposer 合并交给 `ctx.effect`。
 - **2026-09-29（0.3.0）**：适配宿主 DSH 0.2.0-rc.1。逐条核对插件依赖的运行时契约
   （`agent/request` waterfall 语义、`subagentModelSelection` 白名单服务、typert 的
   `create()` 要求）全部未变，**无源码改动**。
