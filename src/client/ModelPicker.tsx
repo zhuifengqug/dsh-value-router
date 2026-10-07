@@ -7,7 +7,7 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { ModelRouteSelection } from '../core/config.ts'
+import type { RouteLine } from '../core/config.ts'
 import { en, zh, type ValueRouterLocaleKey } from './locales.ts'
 import styles from './value-router.module.css'
 import layout from './value-router-polish.module.css'
@@ -48,8 +48,8 @@ export interface ValueRouterModelCatalog {
 
 export interface ModelPickerProps {
   title: string
-  current?: ModelRouteSelection
-  onSelect: (selection: ModelRouteSelection) => void
+  current?: Partial<RouteLine>
+  onSelect: (selection: RouteLine) => void
   onClose: () => void
   fetchModels?: () => Promise<ValueRouterModelCatalog>
   /** 选中模型支持的最强档位，而不是目录默认档位。 */
@@ -218,7 +218,8 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({ title, current, onSele
                       onSelect({
                         provider: group.id,
                         model: model.id,
-                        ...(effort ? { reasoningEffort: effort } : {}),
+                        // 空串 = 不指定，交给目标模型自身默认（不猜测能力）。
+                        reasoning_effort: effort ?? '',
                       })
                       onClose()
                     }}

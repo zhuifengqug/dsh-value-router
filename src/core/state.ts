@@ -1,45 +1,32 @@
 /**
- * 会话级状态与计量（从 value-mode 的 state 移植）。
+ * 进程内状态：子会话线路意图、轮转槽位、派发记录。
  *
- * 两类数据：
- * - 会话覆写（顶栏气泡写入，只影响本会话，不污染全局配置）；
- * - 会话计量：executor 路由调用次数（宿主实值）。
+ * ## 为什么需要「首次意图」快照
  *
- * 桥接通道退役后，桥委派次数 / token 估算 / 节省估算 / estimateOnly 记账与
- * 由此派生的 executor 占比一并删除；只保留可如实陈述的实值计数。
+ * `agent/request` 的 `next()` 只能给出「本次请求实际会用的线路」，官方注释明确
+ * 「首次请求返回 agent options，之后返回 logged header」。插件一旦在首次请求改写过线路，
+ * 后续 step 读到的就是**插件自己写进去的值**，"主控原始意图"就丢了。
+ * 因此必须在改写之前把首见值拍下来 —— 这正是 `ChildRouteIntent` 的唯一用途：
+ * 判断主控是否**显式指定过**一条与父会话不同的线路（= 新契约里的
+ * 「主模型 route 偏好」，`routeSource: 'captain'`）。
  *
- * 子会话归属：浏览器 header 只知道父会话 id，而子代理的计数记在子会话名下，
- * 因此查询父会话时把后代计数聚合回来。
+ * ## 已退役（0.10.0）
+ *
+ * 会话级覆写（顶栏气泡写 `strategy` / `executor`）、`ambiguousPolicy` 歧义开关、
+ * `executorCalls` 计量一并删除：它们承载的配置字段已经不存在。
+ * 「显式指定 == 父模型」的固有歧义现在用**固定规则**消解——
+ * 与父相同即视为没指定（无配置开关），与父不同即视为显式指定。
  */
 
-import type { SessionOverrideConfig } from './config.ts'
+import type { Difficulty } from './config.ts'
 import { routeKey } from './config.ts'
+import type { RouteSource } from './intent.ts'
 
 /** 线路键转出，供既有从 state.ts 导入的调用方使用（定义在 config.ts）。 */
 export { routeKey }
 
-export interface SessionValueRouterMetrics {
-  executorCalls: number
-  override?: SessionOverrideConfig
-}
-
-export interface SessionMetricsSnapshot {
-  executorCalls: number
-  override?: SessionOverrideConfig
-}
-
-export interface GlobalMetricsSnapshot {
-  executorCalls: number
-}
-
 /**
  * 一个子会话「本插件第一次见到它时」的线路意图快照。
- *
- * 为什么需要它：`agent/request` 的 `next()` 只能给出「本次请求实际会用的线路」，
- * 官方注释明确「首次请求返回 agent options，之后返回 logged header」
- * （dsh-agent/lib/types/runtime-types.d.ts:312-314）。插件一旦在首次请求改写过线路，
- * 后续 step 读到的就是**插件自己写进去的值**，"主控原始意图"就丢了。
- * 必须在改写之前把这个值拍下来。
  */
 export interface ChildRouteIntent {
   readonly provider: string
@@ -47,10 +34,7 @@ export interface ChildRouteIntent {
   readonly reasoningEffort?: string
   /** 首次观察到的 turn/step，仅用于日志与冷恢复诊断。 */
   readonly observedAt: { readonly turn: number; readonly step: number }
-  /**
-   * 父会话线路 'provider/model'。用于判定「是否与父相同」——而这正是
-   * `ambiguousPolicy` 唯一能介入的地方。
-   */
+  /** 父会话线路 'provider/model'，用于判定主控是否显式指定过。 */
   readonly parentRoute: string | undefined
   /**
    * first-seen = 本进程内首次见到该子会话；restored = 插件中途加载/重启后第一次见到，
@@ -59,48 +43,48 @@ export interface ChildRouteIntent {
   readonly source: 'first-seen' | 'restored'
 }
 
-function emptyMetrics(): SessionValueRouterMetrics {
-  return { executorCalls: 0 }
-}
-
 /** 一次实际发生的线路改写。 */
 export interface DispatchRecord {
   /** 被改写的子会话；缺失时记为 '?'。 */
   readonly sessionId: string
   readonly provider: string
   readonly model: string
-  /** 实际派发的档位下标；落在兜底线路时为 undefined。 */
-  readonly tierIndex: number | undefined
-  /** 来源：轮转池 / 主控指定线路 / 兜底线路。 */
-  readonly origin: 'pool' | 'explicit' | 'fallback'
+  readonly reasoning_effort?: string
+  /** 决策时使用的难度档。 */
+  readonly difficulty: Difficulty
+  /** 线路来源（difficulty / captain / fallback…）。 */
+  readonly routeSource: RouteSource
+  /** 是否走了全局兜底线路。 */
+  readonly fallback: boolean
+  /** 是否发生了档位降级。 */
+  readonly degraded: boolean
   readonly at: number
 }
 
 /** 派发记录的最大条数（有界环形，长跑进程不无限增长）。 */
 export const MAX_DISPATCH_RECORDS = 50
 
+/** 子会话意图/轮转槽位的内存上限（超出按 FIFO 淘汰最老的）。 */
+export const CHILD_INTENT_MAX_ENTRIES = 2_048
+
 class ValueRouterStateManager {
-  private sessions = new Map<string, SessionValueRouterMetrics>()
-  private globalExecutorCalls = 0
+  private routedCalls = 0
+  private sessionRoutedCalls = new Map<string, number>()
   private dispatches: DispatchRecord[] = []
   /**
    * 子会话 -> 直接父会话（来自 agent/request 的 session.header.parentSession）。
    * 含环保护，避免异常 lineage 造成死循环。
    */
   private parents = new Map<string, string>()
-  /**
-   * 子会话 -> 首次观察到的线路意图。**只在首次观察时写入，永不覆盖**
-   * （覆盖等于把插件自己的改写结果当成主控的原始意图）。
-   */
+  /** 子会话 -> 首次观察到的线路意图。**只在首次观察时写入，永不覆盖**。 */
   private intents = new Map<string, ChildRouteIntent>()
   /**
    * 轮转序号。key 是**子会话**，值是该子会话在其父会话下的创建序号。
-   * 同一个子会话在生命周期内只会分配一次——这是防止多 step 子代理在 step 之间
-   * 跳模型的关键（跳模型会让同一段对话历史由不同模型生成，宿主会插入
-   * model-switch notice）。因此这里**不是**每次 request 递增的计数器。
+   * 同一个子会话在生命周期内只会分配一次——防止多 step 子代理在 step 之间跳模型
+   * （跳模型会让同一段对话历史由不同模型生成，宿主会插入 model-switch notice）。
    */
   private rotationSlots = new Map<string, number>()
-  /** 父会话 -> 已分配出去��轮转序号个数。 */
+  /** 父会话 -> 已分配出去的轮转序号个数。 */
   private rotationCounters = new Map<string, number>()
   /** 父会话缺失（冷恢复/异常）时的进程级兜底计数器。 */
   private orphanRotationCounter = 0
@@ -136,12 +120,14 @@ class ValueRouterStateManager {
    * 记录一次**实际改写**的线路——这是「插件到底干了什么」的唯一可观测出口。
    *
    * 为什么必须有：子代理会话头不带模型信息，`subagent` 工具的返回也不带，
-   * 所以主控和用户在对话里**无法验证**派发是否真的分散了（一次实测验收就因为
-   * 这个而「无法确认三个子代理是不是三个不同模型」）。改写时 provider/model
+   * 所以主控和用户在对话里**无法验证**派发是否真的分散了。改写时 provider/model
    * 就在插件手上，必须把它显示出来，否则这个机制没法被验收。
    */
   recordDispatch(entry: DispatchRecord): void {
+    this.routedCalls++
     this.dispatches.push(entry)
+    const session = entry.sessionId || '?'
+    this.sessionRoutedCalls.set(session, (this.sessionRoutedCalls.get(session) ?? 0) + 1)
     // 有界环形：只留最近若干条，长跑进程不无限增长。
     while (this.dispatches.length > MAX_DISPATCH_RECORDS) this.dispatches.shift()
   }
@@ -166,6 +152,21 @@ class ValueRouterStateManager {
       .reverse()
   }
 
+  /** 本会话（含后代子代理）的改写次数。 */
+  routedCallsFor(sessionId: string): number {
+    if (!sessionId) return 0
+    let total = 0
+    for (const [session, count] of this.sessionRoutedCalls) {
+      if (session === sessionId || this.isDescendantOf(session, sessionId)) total += count
+    }
+    return total
+  }
+
+  /** 进程级改写次数。 */
+  getRoutedCalls(): number {
+    return this.routedCalls
+  }
+
   intentFor(sessionId: string): ChildRouteIntent | undefined {
     return this.intents.get(sessionId)
   }
@@ -174,8 +175,7 @@ class ValueRouterStateManager {
    * 给已记录的意图补上父会话线路。已补过或本来就没有父会话时不动。
    *
    * 与 rememberIntent 分开是因为两者时机不同：线路在首次请求就拍下，而父会话
-   * 线路要等父会话自己的意图也被记录后才拿得到（子代理先于父会话被观察到的情况
-   * 不会发生，但插件中途加载时可能拿不到）。
+   * 线路要等父会话自己的意图也被记录后才拿得到。
    */
   attachParentRoute(sessionId: string, parentRoute: string | undefined): void {
     if (parentRoute === undefined) return
@@ -192,8 +192,7 @@ class ValueRouterStateManager {
   /**
    * 清理过期的意图与轮转槽位（长跑进程里子会话会无限增长）。
    *
-   * Map 保持插入序，所以超限时按 FIFO 淘汰最老的条目即可；不需要时间戳——
-   * `ChildRouteIntent.observedAt` 存的是 turn/step 计数，本来就不是时间。
+   * Map 保持插入序，所以超限时按 FIFO 淘汰最老的条目即可。
    *
    * @param maxEntries 保留上限
    * @returns 被清理的条目数
@@ -211,7 +210,7 @@ class ValueRouterStateManager {
     return removed
   }
 
-  /** 记录子会话的父会话归属；不创建会话条目，因此对非本插件会话调用也无副作用。 */
+  /** 记录子会话的父会话归属；含环保护。 */
   trackChildSession(childId: string, parentSessionId: string): void {
     if (!childId || !parentSessionId || childId === parentSessionId) return
     let current: string | undefined = parentSessionId
@@ -224,7 +223,7 @@ class ValueRouterStateManager {
     this.parents.set(childId, parentSessionId)
   }
 
-  /** 该会话的直接父会话 id（用于查父会话的覆写）。 */
+  /** 该会话的直接父会话 id。 */
   getParentSession(sessionId: string): string | undefined {
     return this.parents.get(sessionId)
   }
@@ -241,66 +240,15 @@ class ValueRouterStateManager {
     return false
   }
 
-  private getSessionState(sessionId: string): SessionValueRouterMetrics {
-    let state = this.sessions.get(sessionId)
-    if (!state) {
-      state = emptyMetrics()
-      this.sessions.set(sessionId, state)
-    }
-    return state
-  }
-
-  /** 记录一次 executor 路由调用。 */
-  recordExecutorCall(sessionId?: string): void {
-    this.globalExecutorCalls++
-    if (!sessionId) return
-    this.getSessionState(sessionId).executorCalls++
-  }
-
-  setSessionOverride(sessionId: string, override?: SessionOverrideConfig): void {
-    const state = this.getSessionState(sessionId)
-    state.override = override ? { ...override } : undefined
-  }
-
-  /** 只读查询：不创建会话条目（子代理会话不该因为查询而常驻内存）。 */
-  getSessionOverride(sessionId: string): SessionOverrideConfig | undefined {
-    return this.sessions.get(sessionId)?.override
-  }
-
-  clearSessionOverride(sessionId: string): void {
-    const state = this.sessions.get(sessionId)
-    if (state) state.override = undefined
-  }
-
-  getSessionMetrics(sessionId: string): SessionMetricsSnapshot {
-    const state = this.sessions.get(sessionId) ?? emptyMetrics()
-    let executorCalls = state.executorCalls
-
-    for (const [childId, child] of this.sessions) {
-      if (childId === sessionId) continue
-      if (!this.isDescendantOf(childId, sessionId)) continue
-      executorCalls += child.executorCalls
-    }
-
-    return {
-      executorCalls,
-      ...(state.override !== undefined ? { override: { ...state.override } } : {}),
-    }
-  }
-
-  getGlobalMetrics(): GlobalMetricsSnapshot {
-    return { executorCalls: this.globalExecutorCalls }
-  }
-
   resetAll(): void {
-    this.sessions.clear()
+    this.routedCalls = 0
+    this.sessionRoutedCalls.clear()
     this.parents.clear()
     this.intents.clear()
     this.rotationSlots.clear()
     this.rotationCounters.clear()
     this.orphanRotationCounter = 0
     this.dispatches.length = 0
-    this.globalExecutorCalls = 0
   }
 }
 

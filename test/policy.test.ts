@@ -1,175 +1,104 @@
 /**
- * 系统提示段测试（0.2.0 重写）：controller / subagent 两段、三档派发倾向、
- * 线路池段，以及「整段不含已退役通道中英文字样」「不得声称强制」的负向断言。
+ * 系统提示段：难度语义、只列可用线路、不复述已退役概念。
  */
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveConfig } from '../src/core/config.ts'
-import { VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER, buildSystemPromptGuidance } from '../src/core/policy.ts'
+import { classifyConfig, type CatalogSnapshot } from '../src/core/catalog.ts'
+import { resolveConfig, type ResolvedValueRouterConfig } from '../src/core/config.ts'
+import { buildSystemPromptGuidance } from '../src/core/policy.ts'
 
-const FALLBACK = { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: '' }
-const line = (provider: string, model: string, allowed = true) => ({ provider, model, reasoningEffort: '', allowed })
-const TIERS = [
-  { id: 'cheap', label: '省', pool: [line('p1', 'cheap-model'), line('p2', 'cheap-model-2')] },
-  { id: 'strong', label: '强', pool: [line('p3', 'strong-model')] },
-]
+const line = (provider: string, model: string, reasoning_effort = '') => ({ provider, model, reasoning_effort })
 
-/**
- * 已退役通道的中英文字样都不得出现在任何角色段里。
- * （写成 [Bb]ridge 字符类，在 i 标志下与逐字写法语义完全等价，
- * 同时让退役验收的字面检索不会命中本断言自身。）
- */
-const FORBIDDEN_CHANNEL = /桥|[Bb]ridge/i
+const CATALOG: CatalogSnapshot = {
+  providers: [
+    { id: 'cheap', catalogKnown: true, models: [{ id: 'mini' }] },
+    { id: 'strong', catalogKnown: true, models: [{ id: 'big' }] },
+  ],
+  allowlist: undefined,
+  at: 0,
+}
 
-test('section 名称与 order 固定（order 145，避免与内置段冲突）', () => {
-  assert.equal(VALUE_ROUTER_SECTION_NAME, 'value-router:guidance')
-  assert.equal(VALUE_ROUTER_SECTION_ORDER, 145)
-})
+function guidance(config: Parameters<typeof classifyConfig>[0], role?: 'controller' | 'subagent'): string {
+  return buildSystemPromptGuidance(classifyConfig(config, CATALOG), role === undefined ? {} : { role })
+}
 
-test('未启用时注入空串', () => {
-  const disabled = resolveConfig({ enabled: false })
-  assert.equal(buildSystemPromptGuidance(disabled), '')
+function config(raw: Parameters<typeof resolveConfig>[0]): ResolvedValueRouterConfig {
+  return resolveConfig(raw)
+}
+
+test('未启用时不注入任何文本', () => {
+  const disabled = config({ enabled: false, tiers: { low: { lines: [line('cheap', 'mini')] } } })
+  assert.equal(buildSystemPromptGuidance(disabled, { role: 'controller' }), '')
   assert.equal(buildSystemPromptGuidance(disabled, { role: 'subagent' }), '')
-  const disabledHalf = resolveConfig({ enabled: false, executor: { provider: 'p' } })
-  assert.equal(buildSystemPromptGuidance(disabledHalf, { role: 'controller' }), '')
 })
 
-test('controller 段：主控定位、派发倾向、send_message 复用提示', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({ executor: FALLBACK }), { role: 'controller' })
-  assert.match(text, /\[价值路由·平衡\]/)
+test('主控段包含四档难度语义，并说明永不改写主模型', () => {
+  const text = guidance(config({ tiers: { low: { lines: [line('cheap', 'mini')] } } }))
   assert.match(text, /主控模型/)
-  assert.match(text, /send_message/)
-  assert.match(text, /复用/)
-  assert.doesNotMatch(text, FORBIDDEN_CHANNEL)
-  assert.doesNotMatch(text, /expert|专家主控|consult_expert/i)
+  assert.match(text, /永远/)
+  for (const id of ['low', 'medium', 'high', 'max']) assert.match(text, new RegExp(id))
 })
 
-test('0.2.0：删掉了「无需也不应手动指定模型」这句与新需求冲突的旧文案', () => {
-  const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
-    { role: 'controller' },
-  )
-  assert.doesNotMatch(text, /无需也不应手动指定模型/)
-  assert.doesNotMatch(text, /自动路由到执行模型/)
-  // 主模型不被接管的承诺仍在
-  assert.match(text, /主模型永远不会被本插件改写/)
+test('只列目录里可用的线路；missing / blocked 的线路不进清单', () => {
+  const cfg = config({
+    tiers: {
+      low: { lines: [line('cheap', 'mini'), line('cheap', 'vanished')] },
+      high: { lines: [line('strong', 'blocked-model')] },
+    },
+  })
+  const classified = classifyConfig(cfg, {
+    ...CATALOG,
+    allowlist: [{ provider: 'cheap', model: 'mini' }],
+  })
+  const text = buildSystemPromptGuidance(classified, { role: 'controller' })
+  assert.match(text, /cheap\/mini/)
+  assert.equal(text.includes('vanished'), false, '目录缺失的线路不该出现在清单里')
+  assert.equal(text.includes('blocked-model'), false, '被白名单挡住的线路不该出现在清单里')
+  assert.match(text, /missing/, '应说明存在不可用线路及其后果')
 })
 
-test('线路池段：列出可用线路、说明轮转、禁止越界', () => {
-  const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
-    { role: 'controller' },
-  )
-  assert.match(text, /线路池/)
-  assert.match(text, /省档（最低档，默认轮转池）/)
-  assert.match(text, /p1\/cheap-model/)
-  assert.match(text, /强档/)
-  assert.match(text, /p3\/strong-model/)
-  // 关键：必须告诉主控「不指定 = 从最低档轮转」，否则它会以为不指定就是继承主模型
-  assert.match(text, /最低档/)
-  assert.match(text, /轮转分配/)
-  assert.match(text, /不同供应商/)
-  assert.match(text, /不要指定清单以外的线路/)
-  assert.doesNotMatch(text, FORBIDDEN_CHANNEL)
+test('没有任何可用线路时整段省略——不承诺不存在的围栏', () => {
+  const text = guidance(config({ tiers: { low: { lines: [line('cheap', 'gone')] } } }))
+  assert.equal(/cheap\/gone/.test(text), false)
+  assert.equal(/difficulty=low/.test(text), false)
 })
 
-test('无档位时整段省略：不能向模型承诺不存在的围栏', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({ executor: FALLBACK }), { role: 'controller' })
-  assert.doesNotMatch(text, /线路池/)
-  assert.doesNotMatch(text, /不要指定清单以外的线路/)
-  // 兜底线路仍要说明，否则主控完全不知道有这回事
-  assert.match(text, /兜底线路/)
-  assert.match(text, /deepseek\/deepseek-chat/)
+test('兜底线路只在可用时才出现在提示里，并说明它不是轮转成员', () => {
+  const withFallback = guidance(config({
+    tiers: { low: { lines: [line('cheap', 'mini')] } },
+    fallback: line('strong', 'big'),
+  }))
+  assert.match(withFallback, /兜底/)
+  assert.match(withFallback, /不是轮转成员/)
+
+  const unusableFallback = guidance(config({
+    tiers: { low: { lines: [line('cheap', 'mini')] } },
+    fallback: line('strong', 'not-in-catalog'),
+  }))
+  assert.equal(unusableFallback.includes('not-in-catalog'), false)
 })
 
-test('白名单闸门：被挡住的线路不出现在提示词里，并显式告知主控', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({
-    executor: FALLBACK,
-    tiers: [{
-      id: 'cheap', label: '省',
-      pool: [line('p1', 'cheap-model'), line('blocked', 'nope', false)],
-    }],
-  }), { role: 'controller' })
-  assert.match(text, /p1\/cheap-model/)
-  assert.doesNotMatch(text, /blocked\/nope/, '被挡线路绝不能出现在清单里，否则主控会去指定它')
-  assert.match(text, /另有 1 条线路被宿主白名单挡住/)
-  assert.match(text, /不要指定/)
-})
-
-test('白名单闸门：所有档位全被挡时整段省略（不能承诺不存在的围栏）', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({
-    executor: FALLBACK,
-    tiers: TIERS.map(t => ({ ...t, pool: t.pool.map(l => ({ ...l, allowed: false })) })),
-  }), { role: 'controller' })
-  assert.doesNotMatch(text, /线路池/)
-  assert.match(text, /兜底线路/)
-})
-
-test('D 规则降级：提示词只给建议，绝不声称"强制"', () => {
-  const text = buildSystemPromptGuidance(
-    resolveConfig({ executor: FALLBACK, tiers: TIERS }),
-    { role: 'controller' },
-  )
-  // agent/request 的 payload 里没有任务描述，插件在路由层无法判定复核类任务，
-  // 因此不得出现任何"强制/必须走强模型"的承诺。
-  assert.doesNotMatch(text, /强制/)
-  assert.doesNotMatch(text, /必须.*强模型/)
-  assert.match(text, /判断任务难度并选档/)
-  assert.match(text, /最高档/)
-})
-
-test('三档派发倾向：少用 / 正常 / 多用，文案互不相同', () => {
-  const text = (strategy: 'saver' | 'balanced' | 'powerful'): string =>
-    buildSystemPromptGuidance(resolveConfig({ strategy, executor: FALLBACK }), { role: 'controller' })
-
-  const saver = text('saver')
-  const balanced = text('balanced')
-  const powerful = text('powerful')
-
-  assert.match(saver, /\[价值路由·更省\]/)
-  assert.match(saver, /派发倾向（少用子代理）/)
-  assert.match(balanced, /\[价值路由·平衡\]/)
-  assert.match(balanced, /派发倾向（正常用）/)
-  assert.match(powerful, /\[价值路由·更强\]/)
-  assert.match(powerful, /派发倾向（多用子代理）/ )
-  assert.match(powerful, /积极派发子代理/)
-
-  assert.notEqual(saver, balanced)
-  assert.notEqual(balanced, powerful)
-  assert.notEqual(saver, powerful)
-  for (const t of [saver, balanced, powerful]) assert.doesNotMatch(t, FORBIDDEN_CHANNEL)
-})
-
-test('balanced 档给出可执行的派发触发条件，且不否定派发', () => {
-  // 回归事故：旧文案说「按需派发」而纪律段写「判断不明确时默认自己处理」，
-  // 两者叠加会让主模型一路自己干完（用户观测：选了预设却一次都没派子代理）。
-  const text = buildSystemPromptGuidance(
-    resolveConfig({ strategy: 'balanced', executor: FALLBACK }),
-    { role: 'controller' },
-  )
-  assert.match(text, /优先派发子代理/)
-  assert.match(text, /并行/)
-  assert.match(text, /文件\/目录/)
-  assert.match(text, /复核/)
-  assert.doesNotMatch(text, /判断不明确时默认自己处理/)
-  // 0.2.0 新增：堵住"来不及/太麻烦"这个偷懒借口
-  assert.match(text, /不得以「来不及 \/ 太麻烦」为由回避派发/)
-})
-
-test('subagent 段：禁止二次派发、要求证据，且不含已退役通道字样', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({ executor: FALLBACK }), { role: 'subagent' })
-  assert.match(text, /\[价值路由·执行子代理\]/)
+test('执行子代理段不含难度清单，并禁止递归派发', () => {
+  const text = guidance(config({ tiers: { low: { lines: [line('cheap', 'mini')] } } }), 'subagent')
+  assert.match(text, /执行子代理/)
   assert.match(text, /不要再次派发子代理/)
-  assert.match(text, /subagent \/ subagent_fork \/ workflow/)
-  assert.match(text, /证据（命令输出、文件行号、复现步骤）/)
-  // 0.2.0：子代理段不再宣称"你跑在某某执行模型上"——它的线路可能随时在轮转
-  assert.doesNotMatch(text, /deepseek\/deepseek-chat/)
-  assert.doesNotMatch(text, FORBIDDEN_CHANNEL)
+  assert.equal(/difficulty=low/.test(text), false)
 })
 
-test('兜底线路未配置时显示（未配置），不抛错', () => {
-  const text = buildSystemPromptGuidance(resolveConfig({ enabled: true }), { role: 'controller' })
-  assert.match(text, /（未配置）/)
-  assert.doesNotMatch(text, FORBIDDEN_CHANNEL)
+test('提示段不复述已退役概念', () => {
+  const text = guidance(config({
+    tiers: { low: { lines: [line('cheap', 'mini')] }, max: { lines: [line('strong', 'big')] } },
+    fallback: line('cheap', 'mini'),
+  }))
+  for (const retired of ['saver', 'balanced', 'powerful', 'executor', 'ambiguousPolicy', 'tierRouting', '轮转池']) {
+    assert.equal(text.includes(retired), false, `提示段不应再出现 ${retired}`)
+  }
+})
+
+test('难度语义说明包含四档的用途描述', () => {
+  const text = guidance(config({ tiers: { medium: { lines: [line('cheap', 'mini')] } } }))
+  assert.match(text, /机械|批量/)
+  assert.match(text, /根因|复核/)
 })

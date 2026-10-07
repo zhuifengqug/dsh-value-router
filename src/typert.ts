@@ -7,13 +7,12 @@
  *
  * loader 校验：strict codec 必须暴露 create()，且 create() 返回真 Zod v4 实例（带 _zod 标记）。
  *
- * 方法（declaration order = wire order，需与 status-controller.ts 的
- * markRemote 顺序一致）：
- * - status：只读快照（路由配置 + executor 健康 + executor 调用计数）；
- * - sessionMetrics：某会话的 executor 调用次数 + 该会话的覆写；
- * - setSessionOverride：写入/清除会话级覆写（顶栏气泡用，不污染全局配置）。
+ * 方法（declaration order = wire order，需与 status-controller.ts 的 markRemote 顺序一致）：
+ * - `status`：只读快照（四档配置 + 可用性 + 派发记录 + 运行事件）；
+ * - `sessionMetrics`：某会话（含后代子代理）的改写次数与派发记录。
  *
- * 桥接通道退役后，桥健康 / token / 批次相关 schema 一并删除。
+ * 0.10.0 删除：`setSessionOverride`（会话级覆写所依赖的 strategy/executor 已退役）
+ * 以及全部旧池/档位 schema。
  */
 import { z } from 'zod'
 
@@ -30,72 +29,73 @@ const sessionMetricsInput = z.object({
   sessionId: z.string().max(256).optional(),
 }).strict()
 
-const routeSelectionSchema = z.object({
-  provider: z.string(),
-  model: z.string(),
-  reasoningEffort: z.string(),
-}).strict()
-
-const overrideSchema = z.object({
-  enabled: z.boolean().optional(),
-  strategy: z.enum(['saver', 'balanced', 'powerful']).optional(),
-  executor: z.object({
-    provider: z.string().optional(),
-    model: z.string().optional(),
-    reasoningEffort: z.string().optional(),
-  }).strict().optional(),
-}).strict()
-
-const setSessionOverrideInput = z.object({
-  sessionId: z.string().min(1).max(256),
-  override: overrideSchema.nullable(),
-}).strict()
-
 // —— 结果 schema ——
 
-const poolLineSchema = z.object({
+const lineStatusSchema = z.enum(['available', 'missing', 'blocked'])
+const difficultySchema = z.enum(['low', 'medium', 'high', 'max'])
+const routeSourceSchema = z.enum(['user', 'captain', 'difficulty', 'fallback', 'none'])
+const routeStatusSchema = z.enum(['resolved', 'pending', 'blocked'])
+
+const lineSchema = z.object({
   provider: z.string(),
   model: z.string(),
-  reasoningEffort: z.string(),
-  allowed: z.boolean(),
+  reasoning_effort: z.string(),
+  status: lineStatusSchema,
+  statusDetail: z.string().optional(),
 }).strict()
 
 const tierSchema = z.object({
-  id: z.string(),
-  label: z.string(),
-  pool: z.array(poolLineSchema),
+  id: difficultySchema,
+  lines: z.array(lineSchema),
 }).strict()
 
 const dispatchSchema = z.object({
   provider: z.string(),
   model: z.string(),
-  tierIndex: z.number().int().nonnegative().nullable(),
-  origin: z.enum(['pool', 'explicit', 'fallback']),
+  difficulty: difficultySchema,
+  routeSource: routeSourceSchema,
+  fallback: z.boolean(),
+  degraded: z.boolean(),
   at: z.number(),
+}).strict()
+
+const routeEventSchema = z.object({
+  type: z.string(),
+  at: z.number(),
+  teamId: z.string().optional(),
+  taskId: z.string().optional(),
+  member: z.string().optional(),
+  sessionId: z.string().optional(),
+  difficulty: z.string().optional(),
+  role: z.string().optional(),
+  route: z.object({
+    provider: z.string(),
+    model: z.string(),
+    reasoning_effort: z.string().optional(),
+  }).strict().optional(),
+  routeSource: routeSourceSchema.optional(),
+  routeStatus: routeStatusSchema.optional(),
+  detail: z.string().optional(),
+  queueReason: z.string().optional(),
 }).strict()
 
 const statusResultSchema = z.object({
   enabled: z.boolean(),
-  strategy: z.enum(['saver', 'balanced', 'powerful']),
   tiers: z.array(tierSchema),
-  executor: routeSelectionSchema,
-  executorStatus: z.enum(['active', 'disabled', 'unconfigured', 'degraded']),
-  executorReason: z.string().optional(),
-  executorCallsTotal: z.number().int().nonnegative(),
-  tierRouting: z.enum(['tier-rotate', 'controller']),
-  recentDispatches: z.array(dispatchSchema),
+  fallback: lineSchema,
+  availableLines: z.number().int().nonnegative(),
+  missingLines: z.number().int().nonnegative(),
+  blockedLines: z.number().int().nonnegative(),
   allowlistKnown: z.boolean(),
+  routedCallsTotal: z.number().int().nonnegative(),
+  recentDispatches: z.array(dispatchSchema),
+  recentEvents: z.array(routeEventSchema),
 }).strict()
 
 const sessionMetricsSchema = z.object({
-  executorCalls: z.number().int().nonnegative(),
-  override: overrideSchema.nullable(),
+  routedCalls: z.number().int().nonnegative(),
   // 本会话（含后代子代理）的派发记录——徽章按会话展示，不能用全局流水
   recentDispatches: z.array(dispatchSchema),
-}).strict()
-
-const setSessionOverrideResultSchema = z.object({
-  ok: z.boolean(),
 }).strict()
 
 // —— descriptor 构造 ——
@@ -141,7 +141,6 @@ export const TYPERT = {
   invocations: [
     invocation('StatusInput', 'status', memoizeSchema(() => statusInput), memoizeSchema(() => statusResultSchema)),
     invocation('SessionMetricsInput', 'sessionMetrics', memoizeSchema(() => sessionMetricsInput), memoizeSchema(() => sessionMetricsSchema)),
-    invocation('SetSessionOverrideInput', 'setSessionOverride', memoizeSchema(() => setSessionOverrideInput), memoizeSchema(() => setSessionOverrideResultSchema)),
   ],
   model: { services: [], events: [], objects: [] },
 }

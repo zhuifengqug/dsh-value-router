@@ -1,16 +1,22 @@
 /**
- * 路由遥测（从 value-mode 的 runtime-telemetry 移植）。
+ * 路由遥测。
  *
- * 事件名改为 value_router_route：只发固定、隐私安全的字段（模型 id 与错误类别），
+ * 事件名 `value_router_route`：只发固定、隐私安全的字段（难度档、模型 id 与错误类别），
  * 不含会话 id、提示词、凭据或上游错误文本。
+ *
+ * 0.10.0：`strategy`（saver/balanced/powerful）随同配置退役，改为上报 `difficulty`
+ * （low/medium/high/max，或 `fallback` 表示走了全局兜底，`unknown` 表示未定档）。
  */
 
 export const VALUE_ROUTER_RUNTIME_TELEMETRY_PREFIX = 'DSH_VALUE_ROUTER_METRIC '
 
+/** 上报用的难度标签。 */
+export type TelemetryDifficulty = 'low' | 'medium' | 'high' | 'max' | 'fallback' | 'unknown'
+
 export type RouteParameters = {
   role: 'main' | 'subagent'
   result: 'started' | 'success' | 'failure' | 'cancelled'
-  strategy: 'saving' | 'balanced' | 'stronger' | 'unknown'
+  difficulty: TelemetryDifficulty
   model: string
   error_type: 'none' | 'auth' | 'rate_limit' | 'timeout' | 'network' | 'provider' | 'invalid_request' | 'cancelled' | 'unknown'
 }
@@ -29,15 +35,22 @@ export function routeErrorType(failure: unknown): RouteParameters['error_type'] 
   return 'unknown'
 }
 
+/** 把任意来源标签收敛成受控的上报值（未知值一律 `unknown`，不回传原文）。 */
+export function telemetryDifficulty(value: string): TelemetryDifficulty {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'max' || value === 'fallback'
+    ? value
+    : 'unknown'
+}
+
 export function routeParameters(
   role: 'main' | 'subagent',
-  strategy: string,
+  difficulty: string,
   model: string,
 ): RouteParameters {
   return {
     role,
     result: 'started',
-    strategy: strategy === 'saver' ? 'saving' : strategy === 'powerful' ? 'stronger' : strategy === 'balanced' ? 'balanced' : 'unknown',
+    difficulty: telemetryDifficulty(difficulty),
     model: /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}$/u.test(model) ? model : 'unknown',
     error_type: 'none',
   }

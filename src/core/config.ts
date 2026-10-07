@@ -1,453 +1,223 @@
 /**
- * 价值路由配置：类型、安全默认值、归一化。
+ * 价值路由配置：四档模型池 + 单一全局 fallback。
  *
- * 设计约束：
- * - 缺少字段必须回落到安全默认值，旧配置缺新增字段仍可加载（逐字段独立兜底）；
- * - **永不抛错**。DSH 0.1.7-rc.2 删掉了插件可注册的 settings validate 回调
- *   （dsh-settings 的 SettingsForms 没有 validate 钩子），在这里抛错会让整个
- *   插件树加载失败。半配置一律 sanitize 成「未配置」并记 warn，不中断会话；
- * - 本模块是纯逻辑，不 import 任何运行时依赖，便于离线单测；
- * - 插件不保存任何凭据。
+ * ## 契约（0.10.0 起）
  *
- * 2026-09-29（0.2.0）变更：
- * - 摘除专属预设，删除 `scope` / `excludePresets` 两个字段。旧配置里的 `scope` 值
- *   会变成未知键，而 schemastery 的 object 解析在非 strict 模式下会 merge 保留未知键，
- *   因此**不需要迁移代码，也不会让插件加载失败**。保留一个默认值错误的枚举反而更危险
- *   ——旧值 'preset' 会让 scopeAllowsPreset 把所有会话判为不在范围，且无任何报错。
- * - 新增 `pool`（轮转线路池）与 `ambiguousPolicy`。
- * - `executor` 语义从「子代理执行模型（唯一目标）」改为「兜底线路」：只在轮转池为空
- *   或池中目标 provider 不可用时使用。**不能删**——宿主不提供任何默认 executor，
- *   主控未显式指定模型时子代理会继承主模型（最贵的那条），删掉等于池空时直接烧主模型。
+ * - 档位固定四档：`low` / `medium` / `high` / `max`，顺序即成本顺序。
+ * - 每档是一个线路列表 `lines`，每条线路三个字段：`provider` / `model` / `reasoning_effort`。
+ * - 同一个 provider/model 可以跨档各配一条（哪怕只差 reasoning_effort），档位归属由用户显式配置决定。
+ * - `fallback` 是**单一**全局兜底线路，**不是任何档位的轮转成员**：只有四档全部无可用线路时才用。
  *
- * 更早的退役记录（2026-09-22）：桥接通道（Chat2API 外发）整体删除，配置面从
- * 30+ 字段收缩到当时的 5 个。被删除的都是桥的所有权：bridge.*、tuning.*、
- * autoDelegate、allowCodeSnippet / allowLocalFileContent /
- * requireConfirmationForCommands、defaultThinking、fallbackMode、maxDepth。
+ * ## 已退役（0.10.0，无迁移、无双读）
+ *
+ * `pool`（扁平池）、旧的动态 `tiers`（`{id,label,pool}`）、`executor`、`strategy`、
+ * `ambiguousPolicy`、`tierRouting`、`migrateLegacyPool` 全部删除。旧配置里残留的这些键
+ * 会被当成未知键丢弃，**不再产生任何路由效果**——不做兼容读取，也不做迁移。
+ *
+ * ## 本模块的纪律
+ *
+ * 纯逻辑：不 import 任何运行时依赖（不碰 ctx、不碰 fs），便于离线单测。
+ * 归一化**永不抛错**：半配置一律 sanitize 成「未配置」，由路由引擎判定为不可用。
  */
 
 export const VALUE_ROUTER_SETTINGS_NAMESPACE = 'value-router'
 
-/** 三档策略：决定子代理派发提示文案的积极程度。 */
-export type ValueRouterStrategy = 'saver' | 'balanced' | 'powerful'
+/** 四档难度/成本档位，顺序即成本从低到高。 */
+export const DIFFICULTIES = ['low', 'medium', 'high', 'max'] as const
 
-/** 系统提示段角色：主控模型 / 执行子代理。 */
-export type ValueRouterRole = 'controller' | 'subagent'
+export type Difficulty = (typeof DIFFICULTIES)[number]
 
-/**
- * 档位标注（0.2.x 遗留）。
- *
- * 0.4.0 起档位是**用户自定义**的（`tiers` 列表），数量与名称都不限。这个联合类型只在
- * **旧扁平 pool 的迁移**里用到：按线路原有的 tier 标签自动归位。
- */
-export type ValueRouterTier = 'cheap' | 'mid' | 'strong'
-
-/**
- * 「显式指定 == 父模型」这一固有歧义的处置。
- *
- * `agent/request` 的 `next()` 只能给出「本次请求实际会用的线路」，无法区分
- * 「主控没指定，子代理继承了父模型」和「主控显式指定了和父模型一样的线路」。
- * - rotate（默认）：当作没指定，交给轮转。省 token，符合本插件的存在目的。
- * - respect：当没指定处理，保留继承。主控极少显式指定与父相同的模型，选它是为了
- *   「绝不擅自改动主控明确写下的东西」。
- */
-export type AmbiguousPolicy = 'rotate' | 'respect'
-
-/**
- * 主控显式指定线路时的处置。
- *
- * - `tier-rotate`（默认，0.5.0）：主控点名的线路只用来**确定档位**，插件在该档内
- *   按序号轮转派发。子代理工具没有「档位」参数，主控能传的只有 provider/model/
- *   reasoning_effort，所以档位由「这条线属于哪一档」反推——插件查表即可，
- *   不需要解析任何模型自由文本。
- * - `controller`：主控指定了哪条就用哪条，完全不改（0.4.x 的 B+1 行为）。
- *
- * 两种模式下，主控**没指定**线路时的兜底都一样：最低档内轮转。
- */
-export type TierRouting = 'tier-rotate' | 'controller'
-
-/** DSH 模型路由选择。 */
-export interface ModelRouteSelection {
-  provider?: string
-  model?: string
-  reasoningEffort?: string
+/** 合法难度判定（唯一真源）。 */
+export function isDifficulty(value: unknown): value is Difficulty {
+  return typeof value === 'string' && (DIFFICULTIES as readonly string[]).includes(value)
 }
 
-/** 归一化后的模型路由选择：三个字段都保证是字符串。 */
-export interface ResolvedModelRoute {
+/** 缺省难度：普通 subagent 没有任务描述时用它（不在 agent/request 层猜难度）。 */
+export const DEFAULT_DIFFICULTY: Difficulty = 'medium'
+
+/** 缺省角色。 */
+export const DEFAULT_ROLE = 'general'
+
+/**
+ * 一条线路：provider + model + reasoning_effort。
+ *
+ * 字段名用 `reasoning_effort`（snake_case）而不是宿主的 `reasoningEffort`：
+ * 配置、服务返回值、任务路由字段三处共用同一份字面量契约，避免在跨插件边界反复改名。
+ * 与宿主 `LlmCallConfig.reasoningEffort` 的桥接只发生在 `core/model-selection.ts` 一处。
+ */
+export interface RouteLine {
   provider: string
   model: string
-  reasoningEffort: string
+  reasoning_effort: string
 }
 
-/** 轮转池里的一条线路。`allowed` 由宿主白名单推导，不写进设置。 */
-export interface PoolLine {
-  provider: string
-  model: string
-  reasoningEffort?: string
-  /**
-   * 是否在宿主 `subagent-model-selection-settings.allowedModels` 里。
-   * 只有 true 的线路参与轮转——这就是「不与白名单冲突」的实现方式：
-   * 白名单是唯一真源，插件不自己发明第二套授权。
-   * 读不到宿主白名单时全部视为 true（宁可放行也不静默清空通道）。
-   */
-  allowed?: boolean
-}
-
-/** 归一化后的池内线路。 */
-export interface ResolvedPoolLine {
-  provider: string
-  model: string
-  reasoningEffort: string
-  allowed: boolean
+/** 归一化后的线路：字段保证是 trim 过的字符串。 */
+export interface ResolvedLine extends RouteLine {
+  /** 目录/白名单判定结果，由 `core/catalog.ts` 写入。 */
+  status: LineStatus
+  /** 判定依据的人读说明（缺失原因），便于审计与 UI 展示。 */
+  statusDetail?: string
 }
 
 /**
- * 一个档位（用户自定义，数量与名称都不限）。
+ * 线路可用性。
  *
- * **列表顺序即优先级**：`tiers[0]` 是最低档，也是主控没指定线路时的兜底轮转池。
- * 越靠后的档位只会被「主控显式指定」命中。
+ * - `available`：目录中可见（或目录为空无法证伪）且未被宿主白名单挡住。
+ * - `missing`：曾经分档、但已从宿主模型目录消失——**保留配置并标记**，不自动派发。
+ * - `blocked`：被宿主白名单挡住，派发会被宿主拒绝。
  */
-export interface Tier {
-  id: string
-  label: string
-  pool: PoolLine[]
+export type LineStatus = 'available' | 'missing' | 'blocked'
+
+/** 一个档位的配置。 */
+export interface TierConfig {
+  lines: RouteLine[]
 }
 
-export interface ResolvedTier {
-  id: string
-  label: string
-  pool: ResolvedPoolLine[]
-}
-
-/** 旧版（0.2.x / 0.3.x）扁平配置：线路自带 tier 标签。仅用于迁移。 */
-export interface LegacyPoolLine extends PoolLine {
-  tier?: ValueRouterTier
-}
-
-/** 会话级覆写（顶栏气泡写入，不污染全局配置）。 */
-export interface SessionOverrideConfig {
-  enabled?: boolean
-  strategy?: ValueRouterStrategy
-  executor?: ModelRouteSelection
-}
+/** 四档配置的定长映射。 */
+export type TiersConfig = Record<Difficulty, TierConfig>
 
 /** 用户层配置（字段可缺，逐字段兜底）。 */
 export interface ValueRouterConfig {
   /** 总开关。 */
   enabled?: boolean
-  strategy?: ValueRouterStrategy
-  /**
-   * 档位列表，**顺序即优先级**。`tiers[0]` = 最低档 = 主控未指定线路时的兜底轮转池。
-   * 空列表 = 只做提示词，不改写任何线路。
-   */
-  tiers?: Tier[]
-  /**
-   * 0.2.x / 0.3.x 的扁平池，**只读**，仅用于自动迁移到 `tiers`。
-   * 迁移按线路自带的 `tier` 标签归位；标签缺失或非法的归入「中」档。
-   */
-  pool?: LegacyPoolLine[]
-  /** 兜底线路：所有档位都不可路由时使用。 */
-  executor?: ModelRouteSelection
-  ambiguousPolicy?: AmbiguousPolicy
-  /** 主控显式指定线路时：按档位轮转（默认）还是完全尊重。 */
-  tierRouting?: TierRouting
+  /** 四档线路池。缺档 = 空档。 */
+  tiers?: Partial<Record<Difficulty, Partial<TierConfig> | undefined>>
+  /** 单一全局兜底线路。 */
+  fallback?: Partial<RouteLine>
 }
 
-/** 归一化后的配置：所有字段必填。 */
+/** 归一化后的档位。 */
+export interface ResolvedTier {
+  id: Difficulty
+  lines: ResolvedLine[]
+}
+
+/** 归一化后的配置：所有字段必填，四档齐备。 */
 export interface ResolvedValueRouterConfig {
   enabled: boolean
-  strategy: ValueRouterStrategy
   tiers: ResolvedTier[]
-  executor: ResolvedModelRoute
-  ambiguousPolicy: AmbiguousPolicy
-  tierRouting: TierRouting
+  fallback: ResolvedLine
 }
 
-export const DEFAULT_STRATEGY: ValueRouterStrategy = 'balanced'
-export const DEFAULT_AMBIGUOUS_POLICY: AmbiguousPolicy = 'rotate'
-export const DEFAULT_TIER_ROUTING: TierRouting = 'tier-rotate'
+/** 空线路（未配置）。 */
+export const EMPTY_LINE: ResolvedLine = Object.freeze({
+  provider: '',
+  model: '',
+  reasoning_effort: '',
+  status: 'missing' as LineStatus,
+})
 
-/** 默认配置（`resolveConfig(undefined)` 的结果）。 */
 export const DEFAULT_CONFIG: ResolvedValueRouterConfig = {
   enabled: true,
-  strategy: DEFAULT_STRATEGY,
-  tiers: [],
-  executor: { provider: '', model: '', reasoningEffort: '' },
-  ambiguousPolicy: DEFAULT_AMBIGUOUS_POLICY,
-  tierRouting: DEFAULT_TIER_ROUTING,
+  tiers: DIFFICULTIES.map(id => ({ id, lines: [] })),
+  fallback: { ...EMPTY_LINE },
 }
 
-// —————————————————————————— 归一化辅助 ——————————————————————————
+// —————————————————————————— 归一化 ——————————————————————————
 
-function bool(v: unknown, dflt: boolean): boolean {
-  return typeof v === 'boolean' ? v : dflt
+function str(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
-function oneOf<T extends string>(v: unknown, allowed: readonly T[], dflt: T): T {
-  return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : dflt
+/** 线路是否完整（provider 与 model 都非空）。`reasoning_effort` 允许为空 = 用模型默认。 */
+export function isCompleteLine(line: Partial<RouteLine> | undefined | null): boolean {
+  return str(line?.provider) !== '' && str(line?.model) !== ''
 }
 
-function str(v: unknown): string {
-  return typeof v === 'string' ? v.trim() : ''
-}
-
-/** 线路的 'provider/model' 归一化键——白名单比对与歧义判定共用同一口径。 */
+/** 线路的 `provider/model` 归一化键。 */
 export function routeKey(provider: string, model: string): string {
   return `${provider}/${model}`
 }
 
-/** 归一化模型路由选择：全部为 trim 后的字符串，缺省空串。 */
-export function resolveModelRoute(v: unknown): ResolvedModelRoute {
-  const raw = (typeof v === 'object' && v !== null ? v : {}) as Record<string, unknown>
-  return {
-    provider: str(raw.provider),
-    model: str(raw.model),
-    reasoningEffort: str(raw.reasoningEffort),
-  }
+/** 线路的完整归一化键：三段都参与，用于成员复用与同档去重。 */
+export function lineKey(line: Partial<RouteLine> | undefined | null): string {
+  return `${str(line?.provider)}/${str(line?.model)}#${str(line?.reasoning_effort)}`
 }
 
-/**
- * 归一化单个池内线路。单项非法返回 undefined（调用方丢弃这一条，不影响同池其它线路）。
- */
-function resolveLine(item: unknown): ResolvedPoolLine | undefined {
-  if (typeof item !== 'object' || item === null) return undefined
-  const raw = item as Record<string, unknown>
-  const provider = str(raw.provider)
-  const model = str(raw.model)
+/** 归一化一条线路；不完整则返回 undefined（调用方丢弃这一条）。 */
+export function resolveLine(raw: unknown): ResolvedLine | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const input = raw as Record<string, unknown>
+  const provider = str(input.provider)
+  const model = str(input.model)
   if (provider === '' || model === '') return undefined
   return {
     provider,
     model,
-    reasoningEffort: str(raw.reasoningEffort),
-    allowed: raw.allowed === false ? false : true,
+    // 空串 = 不指定，交给目标模型自身默认；不猜测、不补默认值。
+    reasoning_effort: str(input.reasoning_effort),
+    status: 'available',
   }
 }
 
 /**
- * 归一化一个档位。**不设条数上限**——用户的现实是订阅分散在多家 provider，
- * 同一个模型可以在多家各放一条，用轮转把额度摊开。
- */
-function resolveTier(item: unknown, index: number): ResolvedTier | undefined {
-  if (typeof item !== 'object' || item === null) return undefined
-  const raw = item as Record<string, unknown>
-  const id = str(raw.id) || `tier-${index + 1}`
-  const label = str(raw.label) || id
-  const pool = Array.isArray(raw.pool)
-    ? raw.pool.map(resolveLine).filter((line): line is ResolvedPoolLine => line !== undefined)
-    : []
-  return { id, label, pool }
-}
-
-/**
- * 0.2.x / 0.3.x 扁平 pool → 0.4.0 档位列表的**自动迁移**。
+ * 归一化四档。
  *
- * 按线路自带的 `tier` 标签归位；标签缺失或非法的归入「中」档。档位顺序固定为
- * 省 → 中 → 强（与旧标签的语义强度一致），且**只创建实际有线路的档位**——
- * 空档位对路由毫无用处，还会把「最低档」这个语义指向一个空池。
- */
-export function migrateLegacyPool(legacy: unknown): ResolvedTier[] {
-  if (!Array.isArray(legacy) || legacy.length === 0) return []
-  const grouped = new Map<ValueRouterTier, ResolvedPoolLine[]>()
-  for (const item of legacy) {
-    const line = resolveLine(item)
-    if (line === undefined) continue
-    const rawTier = (item as Record<string, unknown>).tier
-    const tier: ValueRouterTier = rawTier === 'cheap' || rawTier === 'mid' || rawTier === 'strong'
-      ? rawTier
-      : 'mid'
-    const bucket = grouped.get(tier) ?? []
-    bucket.push(line)
-    grouped.set(tier, bucket)
-  }
-  const order: readonly { id: ValueRouterTier; label: string }[] = [
-    { id: 'cheap', label: '省' },
-    { id: 'mid', label: '中' },
-    { id: 'strong', label: '强' },
-  ]
-  return order
-    .filter(({ id }) => (grouped.get(id)?.length ?? 0) > 0)
-    .map(({ id, label }) => ({ id, label, pool: grouped.get(id) ?? [] }))
-}
-
-/**
- * 归一化档位列表。`tiers` 为空但有旧 `pool` 时自动迁移——用户不需要手工搬数据。
+ * **同档内按完整键去重**：同一档里重复的 (provider, model, reasoning_effort) 只会占一个轮转槽位。
+ * 跨档不去重——同一个 provider/model 出现在不同档是明确支持的配置方式。
  */
 export function resolveTiers(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedTier[] {
-  const c = raw ?? {}
-  if (Array.isArray(c.tiers) && c.tiers.length > 0) {
-    const out: ResolvedTier[] = []
-    c.tiers.forEach((item, index) => {
-      const tier = resolveTier(item, index)
-      if (tier !== undefined) out.push(tier)
-    })
-    return out
-  }
-  return migrateLegacyPool(c.pool)
+  const tiers = raw?.tiers
+  return DIFFICULTIES.map((id) => {
+    const section = tiers?.[id]
+    const items = Array.isArray(section?.lines) ? section.lines : []
+    const seen = new Set<string>()
+    const lines: ResolvedLine[] = []
+    for (const item of items) {
+      const line = resolveLine(item)
+      if (line === undefined) continue
+      const key = lineKey(line)
+      if (seen.has(key)) continue
+      seen.add(key)
+      lines.push(line)
+    }
+    return { id, lines }
+  })
 }
 
-/**
- * 用宿主白名单给所有档位打闸：不在 `allowedModels` 里的线路 `allowed=false`。
- *
- * 白名单是唯一真源——插件不自己发明第二套授权。主控在提示词里看不到被挡的线路，
- * 就不会去指定它们；轮转也不会派到它们。两条冲突路径一起堵死。
- *
- * @param config 已归一化的配置
- * @param allowlist 宿主白名单；`undefined` 表示**读不到**（服务未挂载 / 旧宿主），
- *   此时全部放行——宁可多派，也不把用户的通道静默清空。
- */
-export function applyAllowlist(
-  config: ResolvedValueRouterConfig,
-  allowlist: readonly { provider: string; model: string }[] | undefined,
-): ResolvedValueRouterConfig {
-  const permitted = (line: ResolvedPoolLine): boolean => {
-    if (allowlist === undefined) return true
-    return allowlist.some(route => routeKey(route.provider, route.model) === routeKey(line.provider, line.model))
-  }
-  return {
-    ...config,
-    tiers: config.tiers.map(tier => ({
-      ...tier,
-      pool: tier.pool.map(line => ({ ...line, allowed: permitted(line) })),
-    })),
-  }
-}
-
-/** 池里真正可参与轮转的线路。 */
-export function routableLines(pool: readonly ResolvedPoolLine[]): ResolvedPoolLine[] {
-  return pool.filter(line => line.allowed)
+/** 归一化兜底线路。半配置（只填 provider 或只填 model）归一化为「未配置」。 */
+export function resolveFallback(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedLine {
+  const fallback = resolveLine(raw?.fallback)
+  return fallback ?? { ...EMPTY_LINE }
 }
 
 /**
  * 把任意（可能缺字段 / 来自旧版本）的配置归一化为完整、安全的配置。
- * 每个字段独立兜底，因此新增字段不会让旧配置加载失败。
  *
- * 注意：`raw` 必传（可为 undefined），默认配置请用 `resolveConfig(undefined)`。
+ * **不做旧键迁移**：`pool`、`executor`、`strategy`、`ambiguousPolicy`、`tierRouting` 一律忽略。
  */
 export function resolveConfig(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedValueRouterConfig {
-  const c = raw ?? {}
+  const config = raw ?? {}
   return {
-    enabled: bool(c.enabled, DEFAULT_CONFIG.enabled),
-    strategy: oneOf(c.strategy, ['saver', 'balanced', 'powerful'] as const, DEFAULT_STRATEGY),
-    tiers: resolveTiers(c),
-    executor: resolveModelRoute(c.executor),
-    ambiguousPolicy: oneOf(c.ambiguousPolicy, ['rotate', 'respect'] as const, DEFAULT_AMBIGUOUS_POLICY),
-    tierRouting: oneOf(c.tierRouting, ['tier-rotate', 'controller'] as const, DEFAULT_TIER_ROUTING),
+    enabled: typeof config.enabled === 'boolean' ? config.enabled : DEFAULT_CONFIG.enabled,
+    tiers: resolveTiers(config),
+    fallback: resolveFallback(config),
   }
 }
 
-/**
- * 反查一条线路属于哪个档位——这是「主控定档」得以成立的关键。
- *
- * 子代理工具没有「档位」参数，主控只能点名具体线路；插件靠查表把线路映射回档位。
- * **同一条线路出现在多个档位时取最靠前（成本最低）的那个**：主控点名它通常是在表达
- * 「这条够用」，把它派到更贵的档位是反直觉的。
- *
- * @returns 命中的档位下标；不在任何档位里则返回 undefined
- */
-export function tierIndexOfRoute(
-  tiers: readonly ResolvedTier[],
-  provider: string,
-  model: string,
-): number | undefined {
-  const key = routeKey(provider, model)
-  for (const [index, tier] of tiers.entries()) {
-    if (tier.pool.some(line => routeKey(line.provider, line.model) === key)) return index
-  }
-  return undefined
+/** 找一档。 */
+export function tierOf(tiers: readonly ResolvedTier[], id: Difficulty): ResolvedTier {
+  return tiers.find(tier => tier.id === id) ?? { id, lines: [] }
 }
 
-// —————————————————————————— 路由/会话辅助 ——————————————————————————
-
-/** 模型路由是否完整（provider + model 都非空）。 */
-export function isCompleteModelRoute(
-  route?: ModelRouteSelection,
-): route is ModelRouteSelection & { provider: string; model: string } {
-  return (
-    typeof route?.provider === 'string' &&
-    route.provider.trim().length > 0 &&
-    typeof route?.model === 'string' &&
-    route.model.trim().length > 0
-  )
+/** 从某档开始向下（成本更低）的档位序列，含自身。`low` 只含自身。 */
+export function degradationChain(from: Difficulty): Difficulty[] {
+  const index = DIFFICULTIES.indexOf(from)
+  if (index <= 0) return [from]
+  return DIFFICULTIES.slice(0, index + 1).reverse()
 }
 
-/**
- * 半配置的 executor（只填了 provider 或只填了 model）归一化为「未配置」。
- *
- * 旧版本试图用 `assertConfigValid` 在设置写入时拒绝半配置，但那个函数在 0.1.0 里
- * **根本没有调用点**（死导入），所以线上一直存在半配置的可能。0.2.0 把处理下沉到
- * 读路径：半配置 = 兜底线路不可用 = 退化成「不改写」，而不是抛错让插件树加载失败。
- */
-export function sanitizeExecutor(route: ResolvedModelRoute): ResolvedModelRoute {
-  if (route.provider === '' && route.model === '') return route
-  if (route.provider === '' || route.model === '') {
-    return { provider: '', model: '', reasoningEffort: '' }
-  }
-  return route
-}
-
-/** 人读的模型标签，用于系统提示段。 */
-export function formatModelRoute(route?: ModelRouteSelection): string {
-  if (!isCompleteModelRoute(route)) return '（未配置）'
-  return `${route.provider}/${route.model}`
-}
-
-/**
- * 合并全局配置与会话级覆写（覆写只覆盖显式给出的字段）。
- *
- * 注意：会话级覆写**不覆盖 pool 与 ambiguousPolicy**——轮转序号是按父会话累计的，
- * 临时改池会让同一父会话下的前后子代理跳线路，破坏「同一会话生命周期内线路不变」
- * 这条不变量。气泡只允许临时关掉通道或改档位/兜底线路。
- */
-export function resolveSessionConfig(
-  globalConfig: Partial<ValueRouterConfig> = {},
-  override?: SessionOverrideConfig,
-): Partial<ValueRouterConfig> {
-  if (!override) return globalConfig
-  return {
-    ...globalConfig,
-    ...(override.enabled !== undefined ? { enabled: override.enabled } : {}),
-    ...(override.strategy !== undefined ? { strategy: override.strategy } : {}),
-    ...(override.executor !== undefined ? { executor: override.executor } : {}),
+/** 人读档位名。 */
+export function tierLabel(id: Difficulty): string {
+  switch (id) {
+    case 'low': return '低'
+    case 'medium': return '中'
+    case 'high': return '高'
+    case 'max': return '最高'
   }
 }
 
-/** 归一化「全局配置 ⊕ 会话覆写」后的生效配置。 */
-export function resolveEffectiveConfig(
-  globalConfig: Partial<ValueRouterConfig> | undefined | null,
-  override?: SessionOverrideConfig,
-): ResolvedValueRouterConfig {
-  return resolveConfig(resolveSessionConfig(globalConfig ?? {}, override))
-}
-
-/** 策略人读名（系统提示段与 UI 共用）。 */
-export function strategyLabel(strategy: ValueRouterStrategy): string {
-  return strategy === 'saver' ? '更省' : strategy === 'powerful' ? '更强' : '平衡'
-}
-
-/** 档位人读名。 */
-export function tierLabel(tier: ValueRouterTier): string {
-  return tier === 'cheap' ? '省' : tier === 'strong' ? '强' : '中'
-}
-
-/**
- * 把任意输入（来自浏览器 Remote 的 JSON）归一化为受支持的会话覆写：
- * 丢弃未知键与非法值；null / 空对象 → undefined（= 清除覆写）。
- */
-export function normalizeSessionOverride(raw: unknown): SessionOverrideConfig | undefined {
-  if (typeof raw !== 'object' || raw === null) return undefined
-  const value = raw as Record<string, unknown>
-  const out: SessionOverrideConfig = {}
-  if (typeof value.enabled === 'boolean') out.enabled = value.enabled
-  if (value.strategy === 'saver' || value.strategy === 'balanced' || value.strategy === 'powerful') {
-    out.strategy = value.strategy
-  }
-  if (typeof value.executor === 'object' && value.executor !== null) {
-    const route = value.executor as Record<string, unknown>
-    const executor: ModelRouteSelection = {}
-    if (typeof route.provider === 'string') executor.provider = route.provider.trim()
-    if (typeof route.model === 'string') executor.model = route.model.trim()
-    if (typeof route.reasoningEffort === 'string') executor.reasoningEffort = route.reasoningEffort.trim()
-    out.executor = executor
-  }
-  return Object.keys(out).length > 0 ? out : undefined
+/** 配置里是否一条线路都没配（含 fallback）。 */
+export function isEmptyConfig(config: ResolvedValueRouterConfig): boolean {
+  return config.tiers.every(tier => tier.lines.length === 0) && !isCompleteLine(config.fallback)
 }

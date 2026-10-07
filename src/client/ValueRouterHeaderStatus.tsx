@@ -1,31 +1,37 @@
 /**
- * 顶栏「价值路由」徽章 + 快捷设置气泡。
+ * 顶栏「价值路由」徽章 + 只读状态气泡。
  *
- * 三件事：
- * - 徽章显示当前档位与轮转池规模；
- * - 气泡展示轮转池、兜底线路与健康、本会话/累计改写次数；
- * - 「全局默认 / 仅本会话」切换：仅本会话时经 Remote `setSessionOverride` 写宿主
- *   （只进宿主内存，不污染全局设置），并提供重置。
+ * 0.10.0 的契约：**状态面只读**。
+ * - 删除了「全局默认 / 仅本会话」写入范围切换、会话覆写写入与重置、
+ *   以及 `setSessionOverride` Remote 调用——会话级覆写所依赖的
+ *   strategy/executor 契约已退役（配置只有四档线路 + 一条全局兜底）；
+ * - 气泡展示：四档线路与可用性、兜底线路、可用/缺失/拦截计数、
+ *   本会话派发记录与运行事件；所有写入都在「设置 → 插件」里完成；
+ * - 唯一仍会写入的是**首次使用引导**（仅当配置为空时进入）：它写的是全局
+ *   设置的兜底线路与总开关，等价于用户自己在设置卡里操作。
  *
  * 0.2.0：删除了「生效范围（专属预设 / 所有预设）」相关的全部 UI 与遥测——
- * 插件对全部预设生效，没有可切换的范围。同理删掉了「进入专属预设时自动开启 +
- * 自动弹引导」这条链路，它的前提（专属预设存在）已经不存在了。
+ * 插件对全部预设生效，没有可切换的范围。
  */
 
 import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {
-  ModelRouteSelection,
-  SessionOverrideConfig,
-  ValueRouterConfig,
-  ValueRouterStrategy,
-} from '../core/config.ts'
-import { isCompleteModelRoute, resolveEffectiveConfig, routableLines, strategyLabel } from '../core/config.ts'
+import type { Difficulty, RouteLine, ValueRouterConfig } from '../core/config.ts'
+import { DIFFICULTIES, isEmptyConfig, isCompleteLine, resolveConfig } from '../core/config.ts'
 import { ModelPicker, type ValueRouterModelCatalog } from './ModelPicker.tsx'
 import { useValueRouterConfig } from './useValueRouterConfig.ts'
-import { useLiveSessionMetrics, useLiveStatus, writeSessionOverride } from './use-live-status.ts'
+import {
+  useLiveSessionMetrics,
+  useLiveStatus,
+  type ValueRouterDispatchView,
+  type ValueRouterLineView,
+  type ValueRouterRouteEventView,
+  type ValueRouterRouteSource,
+  type ValueRouterStatusView,
+} from './use-live-status.ts'
+import { en, zh, type ValueRouterLocaleKey } from './locales.ts'
 import styles from './value-router.module.css'
 import headerStyles from './value-router-header.module.css'
 import { reportValueRouterTelemetry } from './telemetry.ts'
@@ -33,7 +39,6 @@ import { reportValueRouterTelemetry } from './telemetry.ts'
 export interface ValueRouterHeaderStatusProps {
   config: ValueRouterConfig
   sessionId: string
-  useSessions?: <T>(selector: (state: { byId: Record<string, unknown> }) => T) => T
   configForm?: ConfigForm<ValueRouterConfig>
   onChange: (patch: Partial<ValueRouterConfig>) => Promise<void> | void
   fetchModels?: () => Promise<ValueRouterModelCatalog>
@@ -41,25 +46,65 @@ export interface ValueRouterHeaderStatusProps {
   clientCtx?: Context
 }
 
-/** 写入落点：全局设置，还是只覆盖本会话。 */
-type WriteMode = 'global' | 'session'
-
-interface SetupDraft {
-  executor: ModelRouteSelection
-  strategy: ValueRouterStrategy
+/** 与 ModelPicker 一致的客户端文案取用方式（宿主 locale 注册表在浏览器侧没有 hook）。 */
+function t(key: ValueRouterLocaleKey): string {
+  return (typeof document !== 'undefined' && document.documentElement.lang.startsWith('en') ? en : zh)[key]
 }
 
-function formatModel(route?: ModelRouteSelection): string {
-  if (!isCompleteModelRoute(route)) return '未配置'
-  return `${route.provider} / ${route.model}`
+const TIER_LABEL: Record<Difficulty, ValueRouterLocaleKey> = {
+  low: 'tierLow',
+  medium: 'tierMedium',
+  high: 'tierHigh',
+  max: 'tierMax',
+}
+
+function tierText(id: string): string {
+  if (id === 'low' || id === 'medium' || id === 'high' || id === 'max') return t(TIER_LABEL[id])
+  return id
+}
+
+function routeSourceText(source: ValueRouterRouteSource): string | undefined {
+  if (source === 'user') return t('routeSourceUser')
+  if (source === 'captain') return t('routeSourceCaptain')
+  if (source === 'difficulty') return t('routeSourceDifficulty')
+  if (source === 'fallback') return t('routeSourceFallback')
+  return undefined
+}
+
+/** 派发记录的来源列：兜底/降级优先说明，其次线路来源，最后是命中的档位。 */
+function dispatchOrigin(record: ValueRouterDispatchView): string {
+  if (record.fallback) return t('fallbackUsed')
+  if (record.degraded) return t('degradedRoute')
+  return routeSourceText(record.routeSource) ?? tierText(record.difficulty)
+}
+
+/** 线路的问题标记；`available` 但有 statusDetail 时按「推理强度未校验」提示。 */
+function lineMarker(line: ValueRouterLineView): { text: string; detail?: string } | undefined {
+  if (line.status === 'missing') return { text: t('lineMissing'), ...(line.statusDetail !== undefined ? { detail: line.statusDetail } : {}) }
+  if (line.status === 'blocked') return { text: t('lineBlocked'), ...(line.statusDetail !== undefined ? { detail: line.statusDetail } : {}) }
+  if (line.statusDetail !== undefined) return { text: t('lineEffortUnverified'), detail: line.statusDetail }
+  return undefined
+}
+
+/** 已知事件类型走文案表；未知类型原样显示（不猜含义）。 */
+function eventText(event: ValueRouterRouteEventView): string {
+  if (event.type === 'route-rejected') return t('routeRejected')
+  if (event.type === 'fallback') return t('fallbackUsed')
+  if (event.type === 'degrade') return t('degradedRoute')
+  if (event.type === 'queue') return t('queued')
+  return event.type
+}
+
+function lineText(line: { provider: string; model: string }): string {
+  return `${line.provider}/${line.model}`
+}
+
+function formatLine(line: Partial<RouteLine> | undefined): string {
+  return isCompleteLine(line) ? `${line?.provider} / ${line?.model}` : t('notSelected')
 }
 
 function renderPortal(node: React.ReactNode): React.ReactNode {
   return typeof document === 'undefined' ? node : createPortal(node, document.body)
-}
-
-function executorStatusText(status: 'active' | 'disabled' | 'unconfigured' | 'degraded'): string {
-  return status === 'active' ? '正常' : status === 'unconfigured' ? '未配置' : status === 'degraded' ? '部分模型不可用' : '已关闭'
 }
 
 export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = ({
@@ -72,41 +117,36 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
 }) => {
   const [open, setOpen] = useState(false)
   const [onboarding, setOnboarding] = useState(false)
-  const [pickingExecutor, setPickingExecutor] = useState(false)
-  const [writeMode, setWriteMode] = useState<WriteMode>('global')
-  const [setupDraft, setSetupDraft] = useState<SetupDraft>({ executor: {}, strategy: 'balanced' })
+  const [pickingFallback, setPickingFallback] = useState(false)
+  const [setupDraft, setSetupDraft] = useState<Partial<RouteLine>>({})
   const [setupError, setSetupError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
-  const [metricsToken, setMetricsToken] = useState(0)
   const rootRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const overrideRef = useRef<SessionOverrideConfig | null>(null)
 
   const liveConfig = useValueRouterConfig(configForm, config)
+  const resolved = resolveConfig(liveConfig)
   const liveStatusResult = useLiveStatus(clientCtx, open)
   const liveStatus = liveStatusResult.data
   const liveStatusError = liveStatusResult.error
-  const liveMetrics = useLiveSessionMetrics(clientCtx, sessionId, open, metricsToken)
-  const sessionOverride = liveMetrics?.override ?? null
-  const resolved = resolveEffectiveConfig(liveConfig, sessionOverride ?? undefined)
-  const fallbackComplete = isCompleteModelRoute(resolved.executor)
-  const allLines = resolved.tiers.flatMap(tier => tier.pool)
-  const poolSize = routableLines(allLines).length
-  const blockedSize = allLines.length - poolSize
-  const configured = poolSize > 0 || fallbackComplete
+  const liveMetrics = useLiveSessionMetrics(clientCtx, sessionId, open)
   // 徽章按会话挂，所以派发记录也按会话取：本会话（含后代子代理）实际跑过哪些模型。
   const sessionDispatches = liveMetrics?.recentDispatches ?? []
-
-  useEffect(() => {
-    overrideRef.current = sessionOverride
-    // 宿主存在覆写就显示「仅本会话」，否则回到「全局默认」。用户点「仅本会话」但尚未
-    // 写入任何字段时不会被这条同步覆盖（sessionOverride 引用未变，effect 不重跑）。
-    setWriteMode(sessionOverride ? 'session' : 'global')
-  }, [sessionOverride])
+  const configured = !isEmptyConfig(resolved)
+  const totalLines = resolved.tiers.reduce((sum, tier) => sum + tier.lines.length, 0)
+  const unhealthy = liveStatus !== undefined && liveStatus.missingLines + liveStatus.blockedLines > 0
+  const stateText = !configured
+    ? t('unconfigured')
+    : !resolved.enabled
+      ? t('disabled')
+      : unhealthy
+        ? t('degraded')
+        : t('enabled')
+  const badgeClass = !configured ? styles.badgeDegraded : resolved.enabled ? styles.badgeActive : styles.badgeInactive
 
   const startOnboarding = (): void => {
-    setSetupDraft({ executor: { ...resolved.executor }, strategy: resolved.strategy })
+    setSetupDraft(isCompleteLine(resolved.fallback) ? { ...resolved.fallback } : {})
     setSetupError(null)
     setOnboarding(true)
     setOpen(true)
@@ -119,132 +159,16 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     setOnboarding(false)
   }
 
-  const reportError = (reason: unknown, fallback: string): void => {
-    setSetupError(reason instanceof Error && reason.message.trim() ? reason.message : fallback)
-    setOpen(true)
-  }
-
-  const persistGlobalPatch = async (patch: Partial<ValueRouterConfig>, fallback: string): Promise<boolean> => {
-    setSetupError(null)
-    try {
-      await onChange(patch)
-      return true
-    } catch (reason) {
-      reportError(reason, fallback)
-      return false
-    }
-  }
-
-  const persistOverride = async (next: SessionOverrideConfig | null, fallback: string): Promise<boolean> => {
-    setSetupError(null)
-    const ok = await writeSessionOverride(clientCtx, sessionId, next)
-    if (!ok) {
-      reportError(null, fallback)
-      return false
-    }
-    setMetricsToken((value) => value + 1)
-    return true
-  }
-
-  /** 会话档：把 patch 合并进已有覆写；全局档：写全局设置。 */
-  const applyScoped = async (patch: SessionOverrideConfig, fallback: string): Promise<void> => {
-    if (writeMode === 'session') {
-      await persistOverride({ ...(overrideRef.current ?? {}), ...patch }, fallback)
-      return
-    }
-    const globalPatch: Partial<ValueRouterConfig> = {}
-    if (patch.enabled !== undefined) globalPatch.enabled = patch.enabled
-    if (patch.strategy !== undefined) globalPatch.strategy = patch.strategy
-    if (patch.executor !== undefined) globalPatch.executor = patch.executor
-    await persistGlobalPatch(globalPatch, fallback)
-  }
-
-  useEffect(() => {
-    if (!open) return
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
-      // 模型选择器单独 portal 到 body：它打开时由自己的遮罩处理外部点击。
-      if (pickingExecutor) return
-      dismissOnboarding()
-    }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      if (pickingExecutor) {
-        setPickingExecutor(false)
-        return
-      }
-      dismissOnboarding()
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [open, onboarding, pickingExecutor])
-
-  useEffect(() => {
-    if (!open) {
-      triggerRef.current?.focus()
-      return
-    }
-    const dialog = pickingExecutor
-      ? document.querySelector<HTMLElement>('[data-value-router-model-picker="true"] [role="dialog"]')
-      : panelRef.current
-    dialog?.querySelector<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')?.focus()
-  }, [open, onboarding, pickingExecutor])
-
-  const handleToggle = async (): Promise<void> => {
-    const nextEnabled = !resolved.enabled
-    await applyScoped(
-      { enabled: nextEnabled },
-      nextEnabled ? '价值路由开启失败，请重试。' : '价值路由关闭失败，请重试。',
-    )
-    reportValueRouterTelemetry({
-      kind: 'state',
-      state: nextEnabled ? 'enabled' : 'disabled',
-      source: writeMode === 'session' ? 'session' : 'manual',
-    })
-  }
-
-  const handleStrategyChange = async (nextStrategy: ValueRouterStrategy): Promise<void> => {
-    if (onboarding) {
-      setSetupDraft((draft) => ({ ...draft, strategy: nextStrategy }))
-    } else {
-      await applyScoped({ strategy: nextStrategy }, '策略保存失败，请重试。')
-    }
-    reportValueRouterTelemetry({ kind: 'strategy', strategy: nextStrategy })
-  }
-
-  const handleModelSelect = (selection: ModelRouteSelection): void => {
-    if (onboarding) {
-      setSetupDraft((draft) => ({ ...draft, executor: selection }))
-    } else {
-      void applyScoped({ executor: selection }, '兜底线路保存失败，请重试。')
-    }
-    setPickingExecutor(false)
-  }
-
-  const handleResetOverride = async (): Promise<void> => {
-    const ok = await persistOverride(null, '会话覆写重置失败，请重试。')
-    if (ok) {
-      setWriteMode('global')
-      reportValueRouterTelemetry({ kind: 'session-override', action: 'reset' })
-    }
-  }
-
   const handleCompleteSetup = async (): Promise<void> => {
-    if (!isCompleteModelRoute(setupDraft.executor)) {
-      setSetupError('请先选择兜底线路。完整的多模型配置（轮转池）请到「设置 → 插件」里添加。')
+    if (!isCompleteLine(setupDraft)) {
+      setSetupError('请先选择全局兜底线路。四档线路可以稍后到「设置 → 插件」里添加。')
       return
     }
     setSaving(true)
     setSetupError(null)
     try {
       // enabled 单独最后写，避免「部分配置」被提前激活。
-      await onChange({ executor: setupDraft.executor })
-      await onChange({ strategy: setupDraft.strategy })
+      await onChange({ fallback: { provider: setupDraft.provider ?? '', model: setupDraft.model ?? '', reasoning_effort: setupDraft.reasoning_effort ?? '' } })
       await onChange({ enabled: true })
       setOnboarding(false)
       setOpen(false)
@@ -258,102 +182,138 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     }
   }
 
-  const label = !configured
-    ? '价值路由 · 待配置'
-    : !resolved.enabled
-      ? '价值路由 · 已关闭'
-      : `价值路由 · ${strategyLabel(resolved.strategy)}`
-  const statusClass = !configured
-    ? styles.badgeDegraded
-    : resolved.enabled
-      ? styles.badgeActive
-      : styles.badgeInactive
+  useEffect(() => {
+    if (!open) return
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
+      // 模型选择器单独 portal 到 body：它打开时由自己的遮罩处理外部点击。
+      if (pickingFallback) return
+      dismissOnboarding()
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      if (pickingFallback) {
+        setPickingFallback(false)
+        return
+      }
+      dismissOnboarding()
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [open, onboarding, pickingFallback])
+
+  useEffect(() => {
+    if (!open) {
+      triggerRef.current?.focus()
+      return
+    }
+    const dialog = pickingFallback
+      ? document.querySelector<HTMLElement>('[data-value-router-model-picker="true"] [role="dialog"]')
+      : panelRef.current
+    dialog?.querySelector<HTMLElement>('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')?.focus()
+  }, [open, onboarding, pickingFallback])
+
+  const renderStatusBody = (status: ValueRouterStatusView): React.ReactElement => (
+    <>
+      {/* 四档 + 兜底：主线一行一条，问题线路（目录缺失 / 白名单外 / 强度未校验）
+          紧跟在该档下面单独成行——整档挤在一行会看不出是哪条线路出了问题。 */}
+      <div className={styles.roleSummary}>
+        {DIFFICULTIES.map((id) => {
+          const tier = status.tiers.find((entry) => entry.id === id)
+          const lines = tier?.lines ?? []
+          return (
+            <React.Fragment key={id}>
+              <div className={styles.popoverItem}>
+                <span className={styles.popoverItemLabel}>{`${tierText(id)}:`}</span>
+                <span className={styles.popoverItemValue}>
+                  {lines.length === 0 ? t('tierEmpty') : lines.map((line) => lineText(line)).join(' → ')}
+                </span>
+              </div>
+              {lines.map((line, index) => {
+                const marker = lineMarker(line)
+                if (marker === undefined) return null
+                return (
+                  <div className={styles.popoverItem} key={`${id}-${index}`}>
+                    <span className={styles.popoverItemLabel}>{lineText(line)}</span>
+                    <span className={styles.popoverItemValue} title={marker.detail}>{marker.text}</span>
+                  </div>
+                )
+              })}
+            </React.Fragment>
+          )
+        })}
+        <div className={styles.popoverItem}>
+          <span className={styles.popoverItemLabel}>{`${t('fallback')}:`}</span>
+          <span className={styles.popoverItemValue}>
+            {status.fallback.provider !== '' ? lineText(status.fallback) : formatLine(resolved.fallback)}
+          </span>
+        </div>
+        {(() => {
+          const marker = lineMarker(status.fallback)
+          if (marker === undefined) return null
+          return (
+            <div className={styles.popoverItem}>
+              <span className={styles.popoverItemLabel}>{lineText(status.fallback)}</span>
+              <span className={styles.popoverItemValue} title={marker.detail}>{marker.text}</span>
+            </div>
+          )
+        })()}
+      </div>
+
+      <div className={styles.statsCard}>
+        <div className={styles.statItem}>
+          <span className={styles.statItemLabel}>{t('sessionRoutedCalls')}</span>
+          <span className={styles.statItemValue}>{`${liveMetrics?.routedCalls ?? 0} ${t('times')}`}</span>
+        </div>
+        <div className={styles.statItem}>
+          <span className={styles.statItemLabel}>{t('totalRoutedCalls')}</span>
+          <span className={styles.statItemValue}>{`${status.routedCallsTotal} ${t('times')}`}</span>
+        </div>
+        <div className={styles.statItem}>
+          <span className={styles.statItemLabel}>{t('availableLines')}</span>
+          <span className={styles.statItemValue}>{status.availableLines}</span>
+        </div>
+        <div className={styles.statItem}>
+          <span className={styles.statItemLabel}>{t('missingLines')}</span>
+          <span className={styles.statItemValue}>{status.missingLines}</span>
+        </div>
+        <div className={styles.statItem}>
+          <span className={styles.statItemLabel}>{t('blockedLines')}</span>
+          <span className={styles.statItemValue}>{status.blockedLines}</span>
+        </div>
+      </div>
+
+      {status.allowlistKnown === false && (
+        <div className={styles.fieldHint} role="status">{t('allowlistUnknown')}</div>
+      )}
+    </>
+  )
 
   const quickPopover = (
     <>
       <div className={headerStyles.popoverHeader}>
-        <span className={styles.title}>价值路由</span>
-        <span className={`${styles.badge} ${statusClass}`}>
-          {resolved.enabled ? (configured ? '已开启' : '配置不完整') : (configured ? '已关闭' : '待配置')}
-        </span>
+        <span className={styles.title}>{t('title')}</span>
+        <span className={`${styles.badge} ${badgeClass}`}>{stateText}</span>
       </div>
 
       {setupError && <div className={headerStyles.setupError} role="alert">{setupError}</div>}
 
-      <div className={styles.scopeSwitcher} role="group" aria-label="写入范围">
-        <button
-          type="button"
-          className={`${styles.scopeButton} ${writeMode === 'global' ? styles.scopeButtonActive : ''}`}
-          aria-pressed={writeMode === 'global'}
-          onClick={() => setWriteMode('global')}
-        >
-          全局默认
-        </button>
-        <button
-          type="button"
-          className={`${styles.scopeButton} ${writeMode === 'session' ? styles.scopeButtonActive : ''}`}
-          aria-pressed={writeMode === 'session'}
-          onClick={() => {
-            setWriteMode('session')
-            reportValueRouterTelemetry({ kind: 'session-override', action: 'set' })
-          }}
-        >
-          仅本会话{sessionOverride ? '（已覆写）' : ''}
-        </button>
-      </div>
-      <div className={headerStyles.setupHint}>会话覆写只写宿主内存，不改动全局设置；轮转池只能全局配置。</div>
-
-      <div className={styles.roleSummary}>
-        {resolved.tiers.map((tier, index) => (
-          <div className={styles.popoverItem} key={tier.id}>
-            <span className={styles.popoverItemLabel}>
-              {index === 0 ? `轮转池（最低档 ${tier.label}）:` : `档位 ${tier.label}:`}
-            </span>
-            <span className={styles.popoverItemValue}>
-              {routableLines(tier.pool).length > 0
-                ? routableLines(tier.pool).map(line => `${line.provider}/${line.model}`).join(' → ')
-                : '无可用线路'}
-            </span>
-          </div>
-        ))}
-        {resolved.tiers.length === 0 && (
-          <div className={styles.popoverItem}>
-            <span className={styles.popoverItemLabel}>轮转池:</span>
-            <span className={styles.popoverItemValue}>未配置（子代理将继承主模型）</span>
-          </div>
-        )}
-        <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>兜底线路:</span>
-          <span className={styles.popoverItemValue}>{formatModel(resolved.executor)}</span>
-        </div>
-        {liveStatus && (
-          <div className={styles.popoverItem}>
-            <span className={styles.popoverItemLabel}>兜底线路状态:</span>
-            <span className={styles.popoverItemValue}>
-              {executorStatusText(liveStatus.executorStatus)}
-              {liveStatus.executorReason ? ` · ${liveStatus.executorReason}` : ''}
-            </span>
-          </div>
-        )}
-        <div className={styles.popoverItem}>
-          <span className={styles.popoverItemLabel}>派发倾向:</span>
-          <span className={styles.popoverItemValue}>{strategyLabel(resolved.strategy)}</span>
-        </div>
-      </div>
+      {liveStatusError !== undefined ? (
+        <div className={styles.dispatchEmpty}>状态通道没连上：{liveStatusError}</div>
+      ) : liveStatus === undefined ? (
+        <div className={styles.dispatchEmpty}>正在连接宿主状态通道…</div>
+      ) : renderStatusBody(liveStatus)}
 
       {/*
         派发记录——「插件到底干了什么」的唯一可观测出口。
         子代理会话头和 subagent 工具的返回都不带模型信息，所以主控和用户在对话里
-        无法验证轮转是否真的生效；这张表就是验收依据。显示 provider + model 全名，
+        无法验证路由是否真的生效；这张表就是验收依据。显示 provider + model 全名，
         否则「同一个模型挂在两家 provider」会看起来像重复。
-
-        **空态必须渲染**：曾经用 `length > 0` 才渲染，结果「还没有派发」和
-        「这个功能不存在」在界面上完全一样——功能缺了却看不出来，这是设计错误。
-      */}
-      {/*
-        派发记录——「插件到底干了什么」的唯一可观测出口。
-        子代理会话头和 subagent 工具的返回都不带模型信息，所以主控和用户在对话里
-        无法验证轮转是否真的生效；这张表就是验收依据。
 
         **永远渲染**：曾经用 `length > 0` 才渲染，结果「还没派发」和「功能不存在」
         在界面上完全一样；后来又用 `liveStatus &&` 包了一层，于是**状态通道一断，
@@ -361,17 +321,15 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       */}
       <div className={styles.dispatchLog}>
         <div className={styles.dispatchLogHead}>
-          本会话派发
-          {liveStatus && sessionDispatches.length > 0 && `（${sessionDispatches.length}）`}
+          {t('recentDispatches')}
+          {liveStatus !== undefined && sessionDispatches.length > 0 && `（${sessionDispatches.length}）`}
         </div>
         {liveStatusError !== undefined ? (
           <div className={styles.dispatchEmpty}>状态通道没连上：{liveStatusError}</div>
         ) : liveStatus === undefined ? (
           <div className={styles.dispatchEmpty}>正在连接宿主状态通道…</div>
         ) : sessionDispatches.length === 0 ? (
-          <div className={styles.dispatchEmpty}>
-            这个会话还没有派发过子代理。派发后这里会显示它实际跑在哪个模型上。
-          </div>
+          <div className={styles.dispatchEmpty}>{t('noDispatches')}</div>
         ) : (
           sessionDispatches.map((record, index) => (
             <div key={index} className={styles.dispatchRow}>
@@ -379,55 +337,34 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
                 {record.model}
               </span>
               <span className={styles.dispatchProvider}>{record.provider}</span>
-              <span className={styles.dispatchOrigin}>
-                {record.tierIndex === null ? '兜底' : `第 ${record.tierIndex + 1} 档`}
-              </span>
+              <span className={styles.dispatchOrigin}>{dispatchOrigin(record)}</span>
             </div>
           ))
         )}
       </div>
 
-      <div className={styles.statsCard}>
-        <div className={styles.statItem}>
-          <span className={styles.statItemLabel}>本会话改写</span>
-          <span className={styles.statItemValue}>{liveMetrics?.executorCalls ?? 0} 次</span>
+      {liveStatus !== undefined && liveStatus.recentEvents.length > 0 && (
+        <div className={styles.dispatchLog}>
+          <div className={styles.dispatchLogHead}>
+            {t('recentEvents')}
+            {`（${liveStatus.recentEvents.length}）`}
+          </div>
+          {liveStatus.recentEvents.map((event, index) => (
+            <div className={styles.dispatchRow} key={index}>
+              <span className={styles.dispatchRoute} title={event.route !== undefined ? lineText(event.route) : undefined}>
+                {event.route !== undefined ? event.route.model : event.member ?? event.taskId ?? t('title')}
+              </span>
+              <span className={styles.dispatchProvider}>{event.route !== undefined ? event.route.provider : ''}</span>
+              <span
+                className={styles.dispatchOrigin}
+                title={event.type === 'queue' ? `${t('queueReason')}: ${event.queueReason ?? event.detail ?? ''}` : event.detail}
+              >
+                {eventText(event)}
+              </span>
+            </div>
+          ))}
         </div>
-        <div className={styles.statItem}>
-          <span className={styles.statItemLabel}>累计改写</span>
-          <span className={styles.statItemValue}>{liveStatus?.executorCallsTotal ?? 0} 次</span>
-        </div>
-      </div>
-
-      <div className={headerStyles.actionStack}>
-        <div className={headerStyles.actionRow}>
-          <button type="button" className={`${styles.button} ${headerStyles.actionButton}`} onClick={() => setPickingExecutor(true)}>换兜底线路</button>
-          <button
-            type="button"
-            className={`${styles.button} ${headerStyles.actionButton}`}
-            onClick={() => {
-              const next: ValueRouterStrategy = resolved.strategy === 'saver' ? 'balanced' : resolved.strategy === 'balanced' ? 'powerful' : 'saver'
-              void handleStrategyChange(next)
-            }}
-          >
-            切档位
-          </button>
-        </div>
-        <div className={headerStyles.actionRow}>
-          <button
-            type="button"
-            className={`${styles.button} ${headerStyles.actionButton} ${resolved.enabled ? '' : styles.buttonPrimary}`}
-            disabled={!configured && !resolved.enabled}
-            onClick={() => void handleToggle()}
-          >
-            {resolved.enabled ? '关闭路由' : '开启路由'}
-          </button>
-          {writeMode === 'session' && sessionOverride && (
-            <button type="button" className={`${styles.button} ${headerStyles.actionButton}`} onClick={() => void handleResetOverride()}>
-              重置会话覆写
-            </button>
-          )}
-        </div>
-      </div>
+      )}
     </>
   )
 
@@ -435,60 +372,43 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
     <>
       <div className={headerStyles.setupHeader}>
         <div>
-          <div className={headerStyles.setupEyebrow}>首次设置 · 约 30 秒</div>
-          <h2 className={headerStyles.setupTitle}>价值路由</h2>
+          <div className={headerStyles.setupEyebrow}>{t('onboardingTitle')}</div>
+          <h2 className={headerStyles.setupTitle}>{t('title')}</h2>
         </div>
-        <button type="button" className={headerStyles.setupClose} aria-label="关闭价值路由引导" onClick={dismissOnboarding}>×</button>
+        <button type="button" className={headerStyles.setupClose} aria-label={t('close')} onClick={dismissOnboarding}>×</button>
       </div>
-      <p className={headerStyles.setupLead}>
-        主模型负责理解与最终交付，子代理负责并行执行。先给一条兜底线路——完整的多模型轮转池请到「设置 → 插件」里配置。
-      </p>
+      <p className={headerStyles.setupLead}>{t('onboardingLead')}</p>
 
       <div className={headerStyles.setupSteps}>
-        <div className={`${headerStyles.setupStep} ${isCompleteModelRoute(setupDraft.executor) ? headerStyles.setupStepReady : ''}`}>
+        <div className={`${headerStyles.setupStep} ${isCompleteLine(setupDraft) ? headerStyles.setupStepReady : ''}`}>
           <span className={headerStyles.setupStepNumber}>01</span>
           <div className={headerStyles.setupStepBody}>
-            <div className={headerStyles.setupStepHeading}>兜底线路</div>
-            <div className={headerStyles.setupStepValue}>{formatModel(setupDraft.executor)}</div>
-            <div className={headerStyles.setupDefaultNote}>池为空或目标 provider 不可用时使用</div>
+            <div className={headerStyles.setupStepHeading}>{t('onboardingStep1')}</div>
+            <div className={headerStyles.setupStepValue}>{formatLine(setupDraft)}</div>
+            <div className={headerStyles.setupDefaultNote}>{t('fallbackDesc')}</div>
           </div>
-          <button type="button" className={`${styles.button} ${headerStyles.setupModelButton}`} onClick={() => setPickingExecutor(true)}>
-            {isCompleteModelRoute(setupDraft.executor) ? '更换' : '选择'}
+          <button type="button" className={`${styles.button} ${headerStyles.setupModelButton}`} onClick={() => setPickingFallback(true)}>
+            {isCompleteLine(setupDraft) ? t('change') : t('selectModel')}
           </button>
         </div>
       </div>
 
       <div className={headerStyles.setupStrategy}>
-        <div className={headerStyles.setupStrategyLabel}>02 · 派发倾向</div>
-        <div className={styles.strategyGroup}>
-          {(['saver', 'balanced', 'powerful'] as const).map((strategy) => (
-            <button
-              type="button"
-              key={strategy}
-              aria-pressed={setupDraft.strategy === strategy}
-              className={`${styles.strategyItem} ${setupDraft.strategy === strategy ? styles.strategyItemSelected : ''}`}
-              onClick={() => void handleStrategyChange(strategy)}
-            >
-              <span className={styles.strategyTitle}>{strategyLabel(strategy)}</span>
-              <span className={styles.strategyDesc}>
-                {strategy === 'saver' ? '少派发，控制调用量' : strategy === 'powerful' ? '积极并行，优先质量' : '按任务复杂度派发'}
-              </span>
-            </button>
-          ))}
-        </div>
+        <div className={headerStyles.setupStrategyLabel}>{t('onboardingStep2')}</div>
+        <p className={headerStyles.setupHint}>{t('tierHint')}</p>
       </div>
 
       {setupError && <div className={headerStyles.setupError} role="alert">{setupError}</div>}
 
       <div className={headerStyles.setupFooter}>
-        <span className={headerStyles.setupHint}>配置保存在全局设置中，可在完整设置里调整</span>
+        <span className={headerStyles.setupHint}>{t('descSupplement')}</span>
         <button
           type="button"
           className={`${styles.button} ${styles.buttonPrimary} ${headerStyles.setupSubmit}`}
-          disabled={saving || !isCompleteModelRoute(setupDraft.executor)}
+          disabled={saving || !isCompleteLine(setupDraft)}
           onClick={() => void handleCompleteSetup()}
         >
-          {saving ? '保存并开启中…' : '完成配置并开启'}
+          {saving ? t('onboardingSaving') : t('onboardingComplete')}
         </button>
       </div>
     </>
@@ -500,7 +420,7 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
       className={`${styles.popover} ${headerStyles.popover} ${onboarding ? headerStyles.onboardingPopover : ''}`}
       role="dialog"
       aria-modal="false"
-      aria-label={onboarding ? '价值路由配置引导' : '价值路由快捷设置'}
+      aria-label={onboarding ? t('onboardingTitle') : t('quickSettings')}
       data-value-router-onboarding={onboarding ? 'true' : 'false'}
     >
       {onboarding ? onboardingPopover : quickPopover}
@@ -514,33 +434,41 @@ export const ValueRouterHeaderStatus: React.FC<ValueRouterHeaderStatusProps> = (
         ref={triggerRef}
         className={`${styles.headerChip} ${!resolved.enabled ? styles.headerChipDisabled : ''}`}
         aria-expanded={open}
-        aria-label="价值路由状态"
+        aria-label={t('quickSettings')}
         onClick={() => {
           if (!open && !configured) startOnboarding()
           else setOpen((value) => !value)
         }}
-        title="价值路由状态与快捷设置"
+        title={`${t('headerStatusPrefix')} · ${stateText}`}
       >
         <span aria-hidden="true">VR</span>
-        <span className={styles.chipLabel}>{label}</span>
+        <span className={styles.chipLabel}>{`${t('headerStatusPrefix')} · ${stateText}`}</span>
         {sessionDispatches.length > 0 && (
           // 本会话派发次数：徽章上就能看出"这个会话派过几个子代理"，
           // 不必点开才知道值不值得点。
-          <span className={styles.chipCount} title={`本会话已派发 ${sessionDispatches.length} 个子代理`}>
+          <span className={styles.chipCount} title={`${t('recentDispatches')} ${sessionDispatches.length}`}>
             {sessionDispatches.length}
           </span>
         )}
-        <span className={styles.chipTag}>{poolSize > 0 ? `池 ${poolSize}` : '无池'}</span>
+        <span className={styles.chipTag}>
+          {liveStatus !== undefined
+            ? `${t('availableLines')} ${liveStatus.availableLines}`
+            : `${totalLines}`}
+        </span>
       </button>
 
       {open && renderPortal(popover)}
 
-      {pickingExecutor && (
+      {pickingFallback && (
         <ModelPicker
-          title="选择兜底线路"
-          current={onboarding ? setupDraft.executor : resolved.executor}
-          onSelect={handleModelSelect}
-          onClose={() => setPickingExecutor(false)}
+          title={onboarding ? t('onboardingStep1') : t('fallback')}
+          current={setupDraft}
+          selectHighestEffort
+          onSelect={(selection) => {
+            setSetupDraft(selection)
+            setPickingFallback(false)
+          }}
+          onClose={() => setPickingFallback(false)}
           fetchModels={fetchModels}
         />
       )}

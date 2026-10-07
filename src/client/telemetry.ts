@@ -4,16 +4,18 @@
  * 隐私口径与来源插件一致：渲染进程只能构造下面这个封闭的枚举词表，
  * Electron 主进程在转发给 ProductMetricsRecorder 之前会再做一次运行时校验。
  * 因此事件里永远不包含 sessionId、提示词、模型名、路径或任何用户内容。
+ *
+ * 0.10.0：`strategy`（三档策略）与会话覆写随配置契约退役，两类事件不再发出。
+ * 主进程侧校验的是一个**封闭词表**，所以这里只做删除、不新增事件种类；
+ * `pool` 事件保留原词表编号，语义收敛为「已配置线路条数」（仍然只报条数、不报模型名）。
  */
 
 export type ValueRouterProductTelemetryEvent =
   | { kind: 'entry'; configured: boolean; source?: 'hero' | 'header' | 'settings' }
   | { kind: 'onboarding'; outcome: 'shown' | 'completed' | 'dismissed' | 'failed'; surface: 'hero' | 'header' | 'settings' }
   | { kind: 'state'; state: 'enabled' | 'disabled' | 'failed' | 'mounted'; source: 'onboarding' | 'manual' | 'auto' | 'settings' | 'session' | 'client' }
-  | { kind: 'strategy'; strategy: 'saver' | 'balanced' | 'powerful' }
-  // 0.2.0：`scope` 事件随专属预设一起退役，改为上报轮转池规模（只报条数，不报模型名）。
+  /** 已配置线路条数（四档 + 兜底），只报条数。 */
   | { kind: 'pool'; size: number }
-  | { kind: 'session-override'; action: 'set' | 'reset' }
 
 type DesktopTelemetryApi = {
   recordValueRouterEvent?: (event: ValueRouterProductTelemetryEvent) => Promise<unknown> | unknown

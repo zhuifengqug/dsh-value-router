@@ -2,9 +2,11 @@
  * 价值路由状态的浏览器通道（Typert Remote）。
  *
  * 浏览器侧顶栏徽章 / 设置卡经此读取宿主真实状态：
- * - status：路由配置 + executor 健康 + executor 调用计数；
- * - sessionMetrics：某会话的 executor 调用次数与覆写；
- * - setSessionOverride：写入/清除会话级覆写（气泡「仅本会话」档）。
+ * - `status`：四档配置 + 可用性判定 + 派发记录 + 运行事件；
+ * - `sessionMetrics`：某会话（含后代子代理）的改写次数与派发记录。
+ *
+ * 0.10.0 删除 `setSessionOverride`：会话级覆写承载的 `strategy` / `executor` 已退役，
+ * 覆写本身没有剩余字段，写入通道随之关闭（顶栏改为只读展示）。
  *
  * Remote 标记用 background-run 同款 plain-JS 写法（不使用装饰器）；
  * 方法顺序必须与 src/typert.ts 的 invocations 顺序一致。
@@ -12,23 +14,42 @@
 
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { Context } from '@deepseek-ai/cordis'
-import type { SessionOverrideConfig } from './core/config.ts'
-import { normalizeSessionOverride } from './core/config.ts'
-import type { ValueRouterStatusSnapshot, DispatchView } from './core/snapshot.ts'
+import type { SnapshotDispatch, ValueRouterStatusSnapshot } from './core/snapshot.ts'
 import { EMPTY_STATUS_SNAPSHOT } from './core/snapshot.ts'
 import { valueRouterState } from './core/state.ts'
 
 /** 会话指标的线上形状（扁平化，便于 strict codec）。 */
 export interface SessionMetricsWire {
-  executorCalls: number
-  override: SessionOverrideConfig | null
+  /** 本会话（含后代子代理）累计改写次数。 */
+  routedCalls: number
   /**
    * **本会话**（含其后代子代理）的实际派发记录，最新的在前。
    *
    * 放在会话指标而不是全局状态里，是因为徽章是按会话挂的——用户问的永远是
    * 「这个会话把子代理派到哪去了」，不是「所有会话一共派了哪些」。
    */
-  recentDispatches: DispatchView[]
+  recentDispatches: SnapshotDispatch[]
+}
+
+/** 把内部派发记录投影成线上形状。 */
+function dispatchView(record: {
+  provider: string
+  model: string
+  difficulty: SnapshotDispatch['difficulty']
+  routeSource: SnapshotDispatch['routeSource']
+  fallback: boolean
+  degraded: boolean
+  at: number
+}): SnapshotDispatch {
+  return {
+    provider: record.provider,
+    model: record.model,
+    difficulty: record.difficulty,
+    routeSource: record.routeSource,
+    fallback: record.fallback,
+    degraded: record.degraded,
+    at: record.at,
+  }
 }
 
 export class ValueRouterStatusController extends TypertRemoteService {
@@ -42,35 +63,17 @@ export class ValueRouterStatusController extends TypertRemoteService {
     const service = this.ctx.get('valueRouter' as never) as
       | { snapshot(): ValueRouterStatusSnapshot }
       | undefined
-    if (!service) {
-      return { ...EMPTY_STATUS_SNAPSHOT, executorReason: '价值路由服务未加载。' }
-    }
+    if (!service) return { ...EMPTY_STATUS_SNAPSHOT }
     return service.snapshot()
   }
 
   async sessionMetrics(_input: Record<string, unknown> = {}): Promise<SessionMetricsWire> {
     const input = (_input ?? {}) as { sessionId?: unknown }
     const sessionId = typeof input.sessionId === 'string' ? input.sessionId : ''
-    const m = valueRouterState.getSessionMetrics(sessionId)
     return {
-      executorCalls: m.executorCalls,
-      override: m.override ?? null,
-      recentDispatches: valueRouterState.recentDispatchesFor(sessionId, 8).map(record => ({
-        provider: record.provider,
-        model: record.model,
-        tierIndex: record.tierIndex ?? null,
-        origin: record.origin,
-        at: record.at,
-      })),
+      routedCalls: valueRouterState.routedCallsFor(sessionId),
+      recentDispatches: valueRouterState.recentDispatchesFor(sessionId, 8).map(dispatchView),
     }
-  }
-
-  async setSessionOverride(_input: Record<string, unknown> = {}): Promise<{ ok: boolean }> {
-    const input = (_input ?? {}) as { sessionId?: unknown; override?: unknown }
-    const sessionId = typeof input.sessionId === 'string' ? input.sessionId.trim() : ''
-    if (!sessionId) return { ok: false }
-    valueRouterState.setSessionOverride(sessionId, normalizeSessionOverride(input.override))
-    return { ok: true }
   }
 }
 
@@ -100,7 +103,7 @@ function runRemoteMarks(instance: unknown): void {
 }
 
 // 顺序必须与 src/typert.ts 的 invocations 顺序一致。
-for (const method of ['status', 'sessionMetrics', 'setSessionOverride']) {
+for (const method of ['status', 'sessionMetrics']) {
   markRemote(ValueRouterStatusController.prototype, method)
 }
 

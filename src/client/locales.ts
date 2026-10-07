@@ -1,8 +1,10 @@
 /**
  * 价值路由（Value Router）浏览器侧文案。
  *
- * 命名空间 'value-router' 与宿主设置 namespace 同名。中文为主、英文为兜底；
- * 主模型永不被插件接管，因此不存在任何「主控模型」相关文案。
+ * 命名空间 'value-router' 与宿主设置 namespace 同名。中文为主、英文为兜底。
+ *
+ * 0.10.0：四档固定（low/medium/high/max）+ 单一全局 fallback；
+ * 已退役的概念（strategy / 动态档位与线路池 / executor / 会话覆写）不再有文案。
  */
 
 export const zh = {
@@ -19,7 +21,7 @@ export const zh = {
   /** 设置左侧栏里的独立分区标题。 */
   sectionLabel: '价值路由',
   description:
-    '主模型永不被接管。主控没显式指定线路时，子代理按轮转池依次分配——并行的子代理落在不同模型上，既补上思考盲区，也避开单条线路的并发瓶颈。对所有预设生效。',
+    '统一的模型路由 owner：主模型永不被接管，子代理与团队成员按任务难度落到不同档位的线路上。四档顺序即成本顺序，档内轮转用于摊开额度，降级只朝更低档走。',
   descSupplement: '线路从你已经配置好的供应商中选择，不需要重新填写 API Key。',
 
   // —— 运行状态 ——
@@ -29,62 +31,72 @@ export const zh = {
   unconfigured: '配置不完整',
   degraded: '部分模型不可用',
 
-  // —— 路由区 ——
-  executorModel: 'executor 子代理执行模型',
-  executorDesc: '只执行主模型派发的单项任务，适合并行调查、局部实现和重复性工作。',
+  // —— 四档 ——
+  tiers: '四档线路',
+  tierLow: '低（low）',
+  tierLowDesc: '机械检索、批量改动、格式清理、单点重命名',
+  tierMedium: '中（medium）',
+  tierMediumDesc: '常规实现与调查、单模块改动、写测试（缺省档）',
+  tierHigh: '高（high）',
+  tierHighDesc: '需要设计判断或跨文件推理、接口与契约变更、较大重构',
+  tierMax: '最高（max）',
+  tierMaxDesc: '疑难根因、安全关键结论、独立复核、跨模块架构决策',
+  tierEmpty: '该档暂无线路；请求落到这一档时会向下降级，绝不自动升档。',
+  tierHint:
+    '档内顺序即轮转顺序（第 N 个任务拿第 N 条，取模循环）。同一个 provider/model 可以跨档各配一条（例如同一模型配不同 reasoning_effort）。没有分档的模型不会被自动派发。',
+
+  // —— 线路编辑 ——
+  lineAdd: '添加线路',
+  lineRemove: '删除',
+  lineMoveUp: '上移',
+  lineMoveDown: '下移',
+  lineMissing: '已从宿主模型目录消失，保留配置但不会派发',
+  lineBlocked: '不在宿主白名单，不会被派发',
+  lineEffortUnverified: '该模型未声明 reasoning_effort 能力，按原值保留未做校验',
+  reasoningEffort: '推理强度',
+  reasoningEffortDefault: '跟随模型默认',
+  reasoningEffortHint: '留空即不指定，由目标模型使用自己的默认档位。',
+  notSelected: '未配置',
   change: '更换',
   selectModel: '选择模型',
-  notSelected: '未配置',
   noAvailableModels: '暂无可用的已配置模型，请先在模型设置中添加供应商。',
-  reasoningEffort: 'executor 推理强度',
-  reasoningEffortDefault: '跟随模型默认',
-  reasoningEffortHint: '子代理请求使用该档位；跟随模型默认时不强制指定。',
 
-  strategy: '运行策略',
-  strategySaver: '更省',
-  strategySaverDesc: '少派发：控制子代理调用次数，把调用留给真正必要的任务。',
-  strategyBalanced: '平衡',
-  strategyBalancedDesc: '按任务复杂度派发，重要结果由主模型复核。',
-  strategyPowerful: '更强',
-  strategyPowerfulDesc: '积极派发并行子任务，要求执行结果附带证据，优先交付质量。',
-
-  // —— 档位与线路池（0.4.0）——
-  tiers: '子代理档位与线路池',
-  tiersEmpty: '尚未添加档位。没有档位时子代理会继承主模型——那是最贵的一条。',
-  tierAdd: '添加档位',
-  tierRemove: '删除档位',
-  tierLowest: '最低档 —— 主控未指定线路时在这里轮转',
-  tierExplicitOnly: '仅在主控显式指定时命中',
-  poolAddTo: '添加线路到该档',
-  poolRemove: '删除',
-  poolMoveUp: '上移',
-  poolMoveDown: '下移',
-  poolBlocked: '不在宿主白名单，不会被派发',
-  poolHint: '档位数量与名称都不限，顺序即优先级：第一个是最低档，也是主控没指定线路时的默认轮转池；越靠后的档位只有主控显式指定才会命中。档内顺序同样是轮转顺序（第 N 个子代理拿第 N 条，取模循环）。同一个模型可以在多家 provider 各放一条，用来把订阅额度摊开。',
-  poolPreview: '最低档轮转顺序（前 6 个子代理）',
-  fallback: '兜底线路',
-  fallbackDesc: '只在所有档位都没有可派线路、或目标线路的 provider 不可用时才用。宿主本身不提供默认线路——没有它，子代理会直接继承主模型。',
+  // —— 兜底 ——
+  fallback: '全局兜底线路',
+  fallbackDesc:
+    '它不是任何档位的轮转成员：只有四档全部无可用线路时才使用。没有它，四档全空时任务会保持待定而不是继承主模型。',
 
   // —— 顶栏徽章与气泡 ——
   headerStatusPrefix: '价值路由',
-  quickSettings: '价值路由快捷设置',
+  quickSettings: '价值路由状态',
   openFullSettings: '完整设置',
-  thisSessionOnly: '仅本会话',
-  globalDefault: '全局默认',
-  sessionOverrideActive: '已覆写',
-  resetSessionOverride: '重置会话覆写',
-  sessionOverrideHint: '会话覆写只写宿主内存，不改动全局设置。',
-  sessionExecutorCalls: '本会话改写',
-  totalExecutorCalls: '累计改写',
+  sessionRoutedCalls: '本会话改写',
+  totalRoutedCalls: '累计改写',
+  availableLines: '可用线路',
+  missingLines: '目录缺失',
+  blockedLines: '白名单外',
+  allowlistUnknown: '读不到宿主白名单，暂不做拦截',
+  recentDispatches: '最近派发',
+  recentEvents: '运行事件',
+  noDispatches: '本会话还没有改写过子代理线路。',
+  routeRejected: '主模型线路被拒，已自动重选',
+  fallbackUsed: '使用了全局兜底',
+  degradedRoute: '已降级到更低档',
+  queued: '排队中',
+  queueReason: '排队原因',
+  routeSourceUser: '用户指定',
+  routeSourceCaptain: '主模型偏好',
+  routeSourceDifficulty: '难度档位',
+  routeSourceFallback: '全局兜底',
 
   // —— 首次引导 ——
   onboardingTitle: '首次使用指引',
-  onboardingStep1: '第一步：选择兜底线路',
-  onboardingStep2: '第二步：选择派发倾向（默认平衡）',
+  onboardingStep1: '第一步：选择全局兜底线路',
+  onboardingStep2: '第二步：给需要的档位补线路（可稍后配置）',
   onboardingComplete: '确认并开启价值路由',
-  onboardingLead: '主模型负责理解与最终交付，子代理负责并行执行。先给一条兜底线路，完整的多模型轮转池请到「设置 → 插件」里配置。',
+  onboardingLead:
+    '主模型负责理解与最终交付，子代理按难度落到不同档位。先给一条全局兜底线路保证「四档全空」时有路可走，完整的分档请到「设置 → 插件」里配置。',
   onboardingSaving: '保存并开启中…',
-  onboardingScopeHint: '配置保存在全局设置中，可在完整设置里调整。',
 
   // —— 收尾 ——
   times: '次',
@@ -93,7 +105,6 @@ export const zh = {
   cancel: '取消',
   save: '保存',
   close: '关闭',
-  estimated: '估算',
   retry: '重试',
 } as const
 
@@ -108,10 +119,9 @@ export const en: Record<ValueRouterLocaleKey, string> = {
   catalogLoadFailed: 'The model catalog could not be loaded. Please retry.',
 
   title: 'Value Router',
-  /** Sidebar section title in Settings. */
   sectionLabel: 'Value Router',
   description:
-    'The primary model is never taken over. When the controller does not name a route, subagents are assigned by rotating through the pool — parallel subagents land on different models, which covers more thinking blind spots and avoids a single-route concurrency bottleneck. Applies to every preset.',
+    'The single model-routing owner: the primary model is never taken over, while subagents and team members land on routes of different tiers by task difficulty. Tier order is cost order; rotation spreads quota within a tier and degradation only ever moves downwards.',
   descSupplement: 'Routes are chosen from providers already configured in DeepSeek Harness without re-entering API keys.',
 
   status: 'Status',
@@ -120,59 +130,67 @@ export const en: Record<ValueRouterLocaleKey, string> = {
   unconfigured: 'Incomplete Configuration',
   degraded: 'Partially Unavailable',
 
-  executorModel: 'Executor Subagent Model',
-  executorDesc: 'Runs only bounded tasks delegated by the primary model, such as investigation and local implementation.',
+  tiers: 'Four Tiers',
+  tierLow: 'Low',
+  tierLowDesc: 'Mechanical search, bulk edits, formatting, single renames',
+  tierMedium: 'Medium',
+  tierMediumDesc: 'Routine implementation and investigation, single-module change, tests (default tier)',
+  tierHigh: 'High',
+  tierHighDesc: 'Design judgement or cross-file reasoning, interface and contract changes, larger refactors',
+  tierMax: 'Max',
+  tierMaxDesc: 'Hard root-cause work, security-critical conclusions, independent review, cross-module architecture',
+  tierEmpty: 'No routes in this tier; a request landing here degrades downwards and never upgrades automatically.',
+  tierHint:
+    'Route order within a tier is the rotation order (subagent N takes route N, wrapping around). The same provider/model may appear in several tiers (for example with different reasoning_effort). A model that is not classified into a tier is never dispatched automatically.',
+
+  lineAdd: 'Add Route',
+  lineRemove: 'Remove',
+  lineMoveUp: 'Move Up',
+  lineMoveDown: 'Move Down',
+  lineMissing: 'Gone from the host model catalog; kept but never dispatched',
+  lineBlocked: 'Not in the host allowlist; never dispatched',
+  lineEffortUnverified: 'This model declares no reasoning_effort capability; the value is kept unverified',
+  reasoningEffort: 'Reasoning Effort',
+  reasoningEffortDefault: 'Model default',
+  reasoningEffortHint: 'Leave empty to specify nothing and let the target model use its own default.',
+  notSelected: 'Not Configured',
   change: 'Change',
   selectModel: 'Select Model',
-  notSelected: 'Not Configured',
   noAvailableModels: 'No configured models available. Please add a provider in Settings first.',
-  reasoningEffort: 'Executor Reasoning Effort',
-  reasoningEffortDefault: 'Model default',
-  reasoningEffortHint: 'Delegated requests use this effort; the model default is not forced.',
 
-  strategy: 'Strategy',
-  strategySaver: 'Saver',
-  strategySaverDesc: 'Dispatch less: cap subagent calls and reserve them for tasks that truly need them.',
-  strategyBalanced: 'Balanced',
-  strategyBalancedDesc: 'Delegate by task complexity, with the primary model reviewing important results.',
-  strategyPowerful: 'Powerful',
-  strategyPowerfulDesc: 'Dispatch subagents eagerly in parallel and require evidence in results, favouring delivery quality.',
-
-  // —— rotation tiers (0.4.0) ——
-  tiers: 'Subagent Tiers & Pools',
-  tiersEmpty: 'No tiers yet. Without one, subagents inherit the primary model — the most expensive route.',
-  tierAdd: 'Add Tier',
-  tierRemove: 'Remove Tier',
-  tierLowest: 'lowest — rotation lands here when the controller names no route',
-  tierExplicitOnly: 'only reached when the controller names a route explicitly',
-  poolAddTo: 'Add Route to Tier',
-  poolRemove: 'Remove',
-  poolMoveUp: 'Move Up',
-  poolMoveDown: 'Move Down',
-  poolBlocked: 'Not in the host allowlist; never dispatched',
-  poolHint: 'Any number of tiers, any names. List order is priority: the first tier is the lowest and is the default rotation pool; later tiers are only reached by an explicit controller choice. Route order within a tier is the rotation order (subagent N takes route N, wrapping around). The same model can appear under several providers to spread subscription quota.',
-  poolPreview: 'Rotation order in the lowest tier (first 6 subagents)',
-  fallback: 'Fallback Route',
-  fallbackDesc: 'Used only when no tier has a dispatchable route, or the selected route provider is unavailable. The host provides no default route — without one, subagents inherit the primary model directly.',
+  fallback: 'Global Fallback Route',
+  fallbackDesc:
+    'Not a rotation member of any tier: used only when all four tiers have no available route. Without it, a task stays pending instead of inheriting the primary model.',
 
   headerStatusPrefix: 'Value Router',
-  quickSettings: 'Value Router quick settings',
+  quickSettings: 'Value Router status',
   openFullSettings: 'Full settings',
-  thisSessionOnly: 'This session',
-  globalDefault: 'Global default',
-  sessionOverrideActive: 'overridden',
-  resetSessionOverride: 'Reset session override',
-  sessionOverrideHint: 'A session override is kept in host memory and never changes global settings. The pool is global-only.',
-  sessionExecutorCalls: 'Session rewrites',
-  totalExecutorCalls: 'Total rewrites',
+  sessionRoutedCalls: 'Session rewrites',
+  totalRoutedCalls: 'Total rewrites',
+  availableLines: 'Available',
+  missingLines: 'Missing',
+  blockedLines: 'Blocked',
+  allowlistUnknown: 'Host allowlist unreadable; no gating applied',
+  recentDispatches: 'Recent dispatches',
+  recentEvents: 'Runtime events',
+  noDispatches: 'No subagent route has been rewritten in this session yet.',
+  routeRejected: 'Captain route rejected, auto-reselected',
+  fallbackUsed: 'Global fallback used',
+  degradedRoute: 'Degraded to a lower tier',
+  queued: 'Queued',
+  queueReason: 'Queue reason',
+  routeSourceUser: 'User-specified',
+  routeSourceCaptain: 'Captain preference',
+  routeSourceDifficulty: 'Difficulty tier',
+  routeSourceFallback: 'Global fallback',
 
   onboardingTitle: 'Getting Started',
-  onboardingStep1: 'Step 1: Select a fallback route',
-  onboardingStep2: 'Step 2: Select a dispatch tendency (Balanced by default)',
+  onboardingStep1: 'Step 1: Select a global fallback route',
+  onboardingStep2: 'Step 2: Add routes to the tiers you need (can be done later)',
   onboardingComplete: 'Confirm and enable Value Router',
-  onboardingLead: 'The primary model owns understanding and final delivery; subagents run in parallel. Start with a fallback route — the full multi-model pool lives in Settings → Plugins.',
+  onboardingLead:
+    'The primary model owns understanding and final delivery; subagents land on tiers by difficulty. Start with one global fallback route so an all-tiers-empty situation still has a path — the full tier layout lives in Settings → Plugins.',
   onboardingSaving: 'Saving and enabling…',
-  onboardingScopeHint: 'Configuration is saved to global settings and can be tuned in the full settings card.',
 
   times: 'calls',
   active: 'Active',
@@ -180,6 +198,5 @@ export const en: Record<ValueRouterLocaleKey, string> = {
   cancel: 'Cancel',
   save: 'Save',
   close: 'Close',
-  estimated: 'estimated',
   retry: 'Retry',
 }

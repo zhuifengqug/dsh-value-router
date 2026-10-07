@@ -1,18 +1,17 @@
 /**
  * 价值路由 @gjs27/dsh-value-router —— 宿主侧（Node.js）。
  *
- * 定位：DSH 会话内的成本感知 + 多模型协作层。
- * - 主模型（用户在会话里选的）永不被插件接管；
- * - 子代理：主控**没显式指定线路**时，按轮转池 `N % 池长` 分配一条线路——
- *   于是并行的子代理（以及 Agent Team 的队友）会自然落在**不同模型**上；
- * - 主控**显式指定**了线路（且指定了与父模型不同的线路）→ 放行，尊重主控；
- * - 池为空、或池中目标 provider 不可用 → 降级到「兜底线路」executor。
+ * 定位：DSH 的**唯一模型路由 owner**。它回答一个问题：
+ * 「这次派发该用哪个 provider/model/reasoning_effort？」
  *
- * 2026-09-29（0.2.0）：专属预设已摘除，插件对**全部预设**生效，scope 门控整体删除。
+ * 两条通道：
+ * 1. **普通 subagent**：`agent/request` 钩子。主模型永不被改写；
+ *    子代理按其首见意图（主控显式指定的线路）或固定 medium/general 档位解析。
+ * 2. **能力服务 `valueRouterRouting`**：任何插件可探测调用 `catalog()/validate()/resolve()/record()`，
+ *    用于任务级路由（Agent Teams 走这条）。服务缺席时调用方保持原行为，本插件不提供替身。
  *
- * 更早的退役记录（2026-09-22）：桥接通道（Chat2API 外发 + bridge_* 三工具 + 12 道门控 +
- * 脱敏/限额/压缩回注/字符估算记账）整体删除，本插件只剩子代理路由这一条通道，
- * 因此不再注册任何工具、不再持有任何 HTTP 客户端或批次队列。
+ * 0.10.0 退役（无迁移、无双读）：扁平 `pool`、旧动态 `tiers`、`executor`、`strategy`、
+ * `ambiguousPolicy`、`tierRouting`、会话级覆写、`migrateLegacyPool`。
  *
  * 注意：不要 `export default apply`（loader unwrapExports 会丢弃模块级 inject）。
  */
@@ -28,74 +27,67 @@ import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 
 import {
   VALUE_ROUTER_SETTINGS_NAMESPACE,
-  applyAllowlist,
-  formatModelRoute,
-  isCompleteModelRoute,
+  DEFAULT_DIFFICULTY,
+  DEFAULT_ROLE,
   resolveConfig,
-  resolveEffectiveConfig,
-  routableLines,
-  sanitizeExecutor,
   type ResolvedValueRouterConfig,
-  type SessionOverrideConfig,
   type ValueRouterConfig,
 } from './core/config.ts'
+import type { AllowlistEntry } from './core/catalog.ts'
 import { Config } from './core/schema.ts'
 import { buildSystemPromptGuidance, VALUE_ROUTER_SECTION_NAME, VALUE_ROUTER_SECTION_ORDER } from './core/policy.ts'
 import { TYPERT } from './typert.ts'
-import { checkRouteAvailability, type ExecutorHealth } from './core/model-selection.ts'
-import { decideSubagentRoute, isSubagentSession, pickTargetRoute, routeSkipText } from './core/routing.ts'
+import { readHostAllowlist } from './core/model-selection.ts'
+import { isExplicitCaptainRoute, isSubagentSession, routeSkipText } from './core/routing.ts'
+import { routeKey } from './core/config.ts'
 import { emitValueRouterRuntimeTelemetry, routeErrorType, routeParameters, type RouteParameters } from './core/runtime-telemetry.ts'
-import { routeKey, valueRouterState, type ChildRouteIntent, type SessionMetricsSnapshot } from './core/state.ts'
-import type { ValueRouterStatusSnapshot } from './core/snapshot.ts'
+import { valueRouterState, type ChildRouteIntent } from './core/state.ts'
+import { buildStatusSnapshot, type SnapshotDispatch, type ValueRouterStatusSnapshot } from './core/snapshot.ts'
+import { RouteEventLog } from './core/audit.ts'
+import { createRoutingService, VALUE_ROUTER_SERVICE_NAME, type ValueRouterRoutingService } from './service.ts'
 import { ValueRouterStatusController } from './status-controller.ts'
 
 export const name = 'value-router'
 export const inject = ['systemPrompt', 'settings', 'llm', 'configEditor']
 
-/**
- * 本插件在 Loader 里的配置条目（只依赖用到的字段）。
- *
- * `@deepseek-ai/cordis-plugin-loader` 不在本包依赖里，用结构化类型代替 import。
- */
+/** Loader 条目的结构（不 import loader 包，避免新增 peerDep）。 */
 interface SettingsConfigEntry {
   options?: { id?: string; config?: unknown }
 }
 
 export * from './core/config.ts'
+export * from './core/catalog.ts'
+export * from './core/intent.ts'
+export * from './core/route.ts'
+export * from './core/audit.ts'
 export * from './core/policy.ts'
 export * from './core/routing.ts'
 export * from './core/state.ts'
 export * from './core/model-selection.ts'
-export * from './core/runtime-telemetry.ts'
 export * from './core/snapshot.ts'
+export * from './service.ts'
 export * from './typert.ts'
 
 /**
  * 设置 schema **必须从 entry 模块导出**。
  *
- * 宿主 `dsh-settings/lib/index.js:538-541` 读的是 `entry.fiber?.runtime?.Config`，
- * 而 `entry.fiber.runtime` 就是本包**主入口模块**的导出对象。少这一行 re-export，
- * 宿主拿到 `undefined` → `describe()` 在 `:417` 把整个条目跳过 → 命名空间不被服务
- * → 客户端 form 恒为 `unavailable` / `writable:false`，表现为「设置里没有卡片」
- * 与「当前配置不可写，请等待运行时连接恢复后重试」。
- *
- * 这个坑栽了两次：一次是忘了给字段加 `.volatile()`（字段被过滤），
- * 一次是忘了导出 `Config`（整个模块对宿主不可见）。`test/schema.test.ts` 现在
- * **从 entry 模块**断言，不再直接 import `core/schema.ts`——测对了规则、
- * 测错了位置，等于没测。
+ * 宿主 `dsh-settings` 读的是 `entry.fiber?.runtime?.Config`，而 `entry.fiber.runtime`
+ * 就是本包**主入口模块**的导出对象。少这一行 re-export，宿主拿到 `undefined` →
+ * `describe()` 把整个条目跳过 → 命名空间不被服务，表现为「设置里没有卡片」
+ * 与「当前配置不可写」。这个坑栽过两次（一次漏 `.volatile()`，一次漏导出 `Config`）。
  */
 export { Config } from './core/schema.ts'
 
+/** 顶栏徽章读取的快照服务。 */
 export interface ValueRouterService {
   snapshot(): ValueRouterStatusSnapshot
-  sessionMetrics(sessionId: string): SessionMetricsSnapshot
 }
 
-/** 兜底线路 provider 可用性的刷新间隔（徽章 executorStatus 的数据来源）。 */
-export const EXECUTOR_HEALTH_REFRESH_MS = 30_000
+/** 目录/可用性刷新的周期（快照缓存与徽章数据来源）。 */
+export const CATALOG_REFRESH_MS = 30_000
 
-/** 子会话意图/轮转槽位的内存上限（超出按 FIFO 淘汰最老的）。 */
-export const CHILD_INTENT_MAX_ENTRIES = 2_048
+/** 快照同步读取的容忍年龄；超龄时后台刷新但仍返回旧值。 */
+export const SNAPSHOT_STALE_MS = 5_000
 
 /** 从 agent/request、agent/status 的 payload 里取会话 id（header.id 是权威来源）。 */
 function sessionIdOf(payload: unknown): string | undefined {
@@ -104,103 +96,87 @@ function sessionIdOf(payload: unknown): string | undefined {
   if (typeof fromHeader === 'string' && fromHeader) return fromHeader
   return typeof agent?.id === 'string' && agent.id ? agent.id : undefined
 }
+
 export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = {}): void | Promise<void> {
-  let currentConfig: ResolvedValueRouterConfig = resolveConfig(initialConfig)
   let currentSource: () => Partial<ValueRouterConfig> = () => initialConfig
+  /** 最近一次目录分类后的配置（四档线路带 status）。提示词段需要同步读数。 */
+  let classified: ResolvedValueRouterConfig = resolveConfig(initialConfig)
+
+  const events = new RouteEventLog()
+
+  /** 宿主白名单（读不到返回 undefined → 不做白名单拦截）。 */
+  function hostAllowlist(): AllowlistEntry[] | undefined {
+    return readHostAllowlist(ctx as unknown as { get(key: never): unknown })
+  }
+
+  const routing: ValueRouterRoutingService = createRoutingService({
+    getConfig: () => currentSource(),
+    llm: () => ctx.llm,
+    readAllowlist: () => hostAllowlist(),
+    events,
+  })
 
   /**
-   * 读宿主 `subagent-model-selection-settings` 的白名单。
-   *
-   * 宿主在**子代理创建前**用它校验主控显式指定的线路（`assertAllowedModelSelection`），
-   * 但纯继承不校验。插件的改写发生在创建之后，宿主根本看不到——所以必须由插件自己
-   * 拿同一份名单当闸门，否则主控指定一条被宿主拒绝的线路就会让工具调用失败。
-   *
-   * 用结构化类型而不是 import：`@deepseek-ai/dsh-tool-subagent/model-selection-settings`
-   * 是子路径导出的可选服务，宿主没挂载（或老宿主没有）时读不到。此时返回 undefined，
-   * applyAllowlist 会**全部放行**——宁可多派，也不静默清空用户的通道。
-   * （与本文件对 configEditor / agentPresets 的既有取法一致，不新增 peerDep。）
+   * 快照缓存。`snapshot()` 必须同步返回（Remote 控制器直接返回它），
+   * 因此这里在配置绑定、周期刷新与按需过期时异步重建缓存。
    */
-  function hostAllowlist(): { provider: string; model: string }[] | undefined {
+  let snapshotCache: ValueRouterStatusSnapshot = buildStatusSnapshot({
+    config: resolveConfig(initialConfig),
+    allowlistKnown: hostAllowlist() !== undefined,
+    routedCallsTotal: 0,
+    recentDispatches: [],
+    recentEvents: [],
+  })
+  let snapshotAt = 0
+  let refreshing = false
+
+  async function refreshSnapshot(): Promise<void> {
+    if (refreshing) return
+    refreshing = true
     try {
-      const service = ctx.get('subagentModelSelection' as never) as
-        | { current?: () => { enabled?: unknown; allowedModels?: unknown } }
-        | undefined
-      const allowedModels = service?.current?.()?.allowedModels
-      if (!Array.isArray(allowedModels)) return undefined
-      const out: { provider: string; model: string }[] = []
-      for (const item of allowedModels) {
-        if (typeof item !== 'object' || item === null) continue
-        const route = item as Record<string, unknown>
-        if (typeof route.provider === 'string' && typeof route.model === 'string') {
-          out.push({ provider: route.provider, model: route.model })
-        }
+      const view = await routing.catalog()
+      const raw = resolveConfig(currentSource())
+      classified = {
+        enabled: raw.enabled,
+        tiers: view.tiers.map(tier => ({ id: tier.id, lines: tier.lines })),
+        fallback: view.fallback,
       }
-      return out
-    } catch {
-      return undefined
+      snapshotCache = buildStatusSnapshot({
+        config: classified,
+        allowlistKnown: view.allowlistKnown,
+        routedCallsTotal: valueRouterState.getRoutedCalls(),
+        recentDispatches: valueRouterState.recentDispatches(12).map(record => ({
+          provider: record.provider,
+          model: record.model,
+          difficulty: record.difficulty,
+          routeSource: record.routeSource,
+          fallback: record.fallback,
+          degraded: record.degraded,
+          at: record.at,
+        } satisfies SnapshotDispatch)),
+        recentEvents: events.list().slice(-40).reverse(),
+      })
+      snapshotAt = Date.now()
+    } catch (error) {
+      ctx.logger?.warn?.(`value-router: 状态快照刷新失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      refreshing = false
     }
   }
 
-  /** 全局配置 + 宿主白名单闸门。会话覆写在此之后叠加。 */
-  function resolveGated(raw: Partial<ValueRouterConfig> | undefined | null): ResolvedValueRouterConfig {
-    return applyAllowlist(resolveConfig(raw), hostAllowlist())
-  }
-
-  const getConfig = (): ResolvedValueRouterConfig => resolveGated(currentSource())
-
-  // —— 兜底线路健康缓存（同步快照用；探活间隔刷新）——
-  let executorHealth: ExecutorHealth = { status: 'disabled', executorHealth: 'unconfigured' }
-  const refreshExecutorHealth = async (): Promise<void> => {
-    const effective = resolveGated(currentSource())
-    const executor = sanitizeExecutor(effective.executor)
-    executorHealth = await checkRouteAvailability(ctx.llm, executor).then((h) => ({
-      status: !effective.enabled ? 'disabled' as const
-        : h === 'unconfigured' ? 'unconfigured' as const
-          : h === 'unavailable' ? 'degraded' as const
-            : 'active' as const,
-      executorHealth: h,
-      ...(h === 'unconfigured' ? { reason: '兜底线路未配置完整' } : {}),
-      ...(h === 'unavailable' ? { reason: '兜底线路 provider 不可用' } : {}),
-    }))
-  }
-
-  /** 结构化日志（与 status-controller 一致：缺失/抛错都不影响路由）。 */
   const warn = (message: string): void => {
-    try {
-      ctx.logger?.warn?.(message)
-    } catch { /* ignore */ }
+    try { ctx.logger?.warn?.(message) } catch { /* ignore */ }
   }
   const info = (message: string): void => {
-    try {
-      ctx.logger?.info?.(message)
-    } catch { /* ignore */ }
+    try { ctx.logger?.info?.(message) } catch { /* ignore */ }
   }
 
-  // —— 设置：DSH 0.1.7-rc.2 起 installSection() 已移除 ——
-  //
-  // 旧版本靠 installSection(ctx, ns, Config, value, { setSource, onChange, validate })
-  // 注册命名空间并拿到一个「随配置热更新」的 source。rc.2 把配置编辑权收归
-  // ctx.configEditor（profile patch 文件 + Loader 热重载），SettingsForms 只负责
-  // 表单（configure/describe/update/replace/mutate）：
-  //   - 表单本身：宿主从 Loader runtime 读模块导出的 Config（dsh-settings 的
-  //     SettingsForms.schema(entry) => entry.fiber.runtime.Config），因此这里
-  //     不需要（也没有 API）再注册一次 schema；命名空间仍是 Loader 条目 id，
-  //     即 VALUE_ROUTER_SETTINGS_NAMESPACE，与客户端 SettingsScope 一致。
-  //   - 配置值：编辑落盘后 Loader 会重建条目、以新 config 重新调用 apply()，
-  //     所以「记住本条目」再按需读回，就能在每次 apply 后拿到最新值。
-  // 任何一步不可用都只降级（保留 entry config 解析 + 一条 warning），不抛错。
+  // —— 设置：配置编辑权归 ctx.configEditor（profile patch + Loader 热重载）——
   let settingsEntry = findOwnConfigEntry()
   const settingsSection = registerSettingsSection()
   ctx.effect(() => settingsSection ?? (() => undefined), 'value-router: settings surface')
 
-  /**
-   * 启动时把宿主 `settings.describe()` 的真实结果打进日志。
-   *
-   * 为什么需要：客户端只能看到 `status=unavailable`——**宿主把「命名空间没进
-   * describe()」和「连接没建立」压成同一个信号**，而这两者的排查方向完全相反。
-   * describe() 内部有多个早退闸门（schema 缺失 / fiber 未激活 / volatile 过滤后为空），
-   * 从编译产物里读代码推断已经连错两次；这里直接问宿主本身。
-   */
+  /** 把宿主 `settings.describe()` 的真实结果打进日志（排查"设置里没有卡片"）。 */
   function reportSettingsSurface(): void {
     const probe = (phase: string): void => {
       let line: string
@@ -212,7 +188,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         } else {
           const namespaces = rows.map(row => String(row.ns)).sort()
           const present = namespaces.includes(VALUE_ROUTER_SETTINGS_NAMESPACE)
-          line = `${phase}：${namespaces.length} 个命名空间；本插件 ${present ? '**在列**' : '**不在列**'}；全量=${namespaces.join(',') || '(空)'}`
+          line = `${phase}：${namespaces.length} 个命名空间；本插件 ${present ? '**在列**' : '**不在列**'}`
         }
       } catch (error) {
         line = `${phase}：describe() 抛错：${error instanceof Error ? error.message : String(error)}`
@@ -226,40 +202,10 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     }
 
     probe('apply() 同步')
-    // apply() 期间组合尚未定稿，此刻的 describe() 不代表稳态；延后再问一次。
-    const timer = setTimeout(() => {
-      probe('+3s 稳态')
-      reportStatusChannel()
-    }, 3_000)
+    const timer = setTimeout(() => probe('+3s 稳态'), 3_000)
     ;(timer as unknown as { unref?: () => void }).unref?.()
   }
 
-  /**
-   * 临时旁路：报告**状态通道**（Typert Remote）的挂载结果。
-   *
-   * 客户端的派发记录一直停在「正在连接宿主状态通道…」，而客户端把 $mount 的失败
-   * 全部吞掉，界面上什么都看不出来。宿主这一侧能直接回答：服务有没有提供、
-   * typert 通道在不在、TYPERT 清单有没有被登记。
-   */
-  function reportStatusChannel(): void {
-    const sink = process.env.VALUE_ROUTER_DIAG_SINK
-    const say = (line: string): void => {
-      info(`value-router: 状态通道诊断——${line}`)
-      if (sink === undefined || sink === '') return
-      try { appendFileSync(sink, `[${new Date().toISOString()}] 状态通道 ${line}\n`, 'utf8') } catch { /* ignore */ }
-    }
-    say(`valueRouter 服务：${ctx.get('valueRouter' as never) !== undefined ? '已提供' : '缺失'}`)
-    say(`typert 服务：${ctx.get('typert' as never) !== undefined ? '存在' : '缺失'}`)
-    say(`TYPERT 清单：invocations=${TYPERT.invocations.length} package=${TYPERT.package}`)
-  }
-
-
-  /**
-   * 取出本插件在 Loader 里的配置条目。
-   *
-   * 优先用 configEditor.entries()（带 profile patch 层），退化为遍历 loader.entries()。
-   * 找不到就返回 undefined——apply() 仍然依赖传入的 initialConfig 正常工作。
-   */
   function findOwnConfigEntry(): SettingsConfigEntry | undefined {
     try {
       const editor = ctx.get('configEditor' as never) as
@@ -267,7 +213,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         | undefined
       const rows = editor?.entries?.()
       if (Array.isArray(rows)) {
-        const own = rows.find((row) => row?.options?.id === VALUE_ROUTER_SETTINGS_NAMESPACE)
+        const own = rows.find(row => row?.options?.id === VALUE_ROUTER_SETTINGS_NAMESPACE)
         if (own !== undefined) return own
       }
     } catch { /* configEditor 缺失/未就绪 → 回落到 loader */ }
@@ -280,72 +226,46 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     return undefined
   }
 
-  /**
-   * 把 currentSource 指向 Loader 条目上的实时配置。
-   *
-   * 一次 apply 期间条目 config 不变，所以只在启动时和「条目被热替换后」重绑；
-   * 绑定时同步 currentConfig 与 executor 健康，等价于旧的 onChange()。
-   */
+  /** 把 currentSource 指向 Loader 条目上的实时配置。 */
   function bindConfigFromEntry(): void {
     const entry = settingsEntry
     if (entry === undefined) return
     currentSource = () => (entry.options?.config ?? {}) as Partial<ValueRouterConfig>
-    currentConfig = resolveGated(currentSource())
-    void refreshExecutorHealth()
+    void refreshSnapshot()
   }
 
   /**
-   * 注册设置页策略并建立「外部写入 → 重算 currentConfig」的监听。
+   * 注册设置页策略并建立「外部写入 → 重算配置」的监听。
    *
-   * SettingsForms.configure() 只声明表单策略、不接收配置回调，因此这里在
-   * configure 之后按需自建监听：宿主写入（configEditor.edit → Loader 热重载）
-   * 会替换条目，此时重新绑定 source 并刷新 executor 健康。
-   *
-   * 0.9.0 适配 DSH 0.2.0-rc.2：configure() 的返回值必须被消费。rc.2 起它对
-   * **同一 fiber 重复注册直接抛错**（`Settings presentation is already configured`），
-   * 且 `presentations` 这张 Map 强引用 fiber，不释放就是随热重载持续泄漏。
-   * 于是这里把 configure 的 disposer 与条目轮询的 disposer 合成一个交给 ctx.effect，
-   * 卸载时两个都跑掉；重挂时 configure 才能再次成功。
+   * DSH 0.2.0-rc.2 起 `configure()` 对同一 fiber 重复注册直接抛错，
+   * 且 `presentations` 强引用 fiber；因此把 configure 的 disposer 与条目轮询的 disposer
+   * 合成一个交给 `ctx.effect`，卸载时两个都跑掉。
    */
   function registerSettingsSection(): (() => void) | undefined {
     try {
       const settings = ctx.settings as {
         configure?: (presentation: { auto?: boolean }, owner?: unknown) => unknown
-        describe?: () => readonly { ns?: unknown }[]
       } | undefined
       if (settings === undefined || typeof settings.configure !== 'function') {
         warn('value-router: ctx.settings.configure 不可用；设置页降级为 Loader 条目配置。')
         return undefined
       }
       bindConfigFromEntry()
-      // auto: true 与宿主默认一致，显式写出以声明「本条目由宿主自动生成表单」；
-      // 客户端 settings.plugin.item 卡片按同一 namespace 挂载。
       const disposePresentation = settings.configure({ auto: true }, ctx.fiber)
       const stopWatchingEntry = buildSettingsEntryWatcher()
-      info(
-        `value-router: settings 命名空间 "${VALUE_ROUTER_SETTINGS_NAMESPACE}" 就绪（settings.configure，条目 id 即 namespace）`,
-      )
+      info(`value-router: settings 命名空间 "${VALUE_ROUTER_SETTINGS_NAMESPACE}" 就绪`)
       reportSettingsSurface()
       return () => {
-        // 先摘条目轮询再摘表单策略：顺序反了也不影响正确性（两者互不依赖），
-        // 但保持「先停我们自己的东西」的一致读法。
         stopWatchingEntry()
         if (typeof disposePresentation === 'function') disposePresentation()
       }
     } catch (error) {
-      warn(
-        `value-router: 设置页注册失败（${error instanceof Error ? error.message : String(error)}）；降级为 Loader 条目配置。`,
-      )
+      warn(`value-router: 设置页注册失败（${error instanceof Error ? error.message : String(error)}）；降级为 Loader 条目配置。`)
       return undefined
     }
   }
 
-  /**
-   * 自建「条目热替换 → 重绑 source」监听：configEditor 没有变更事件，
-   * 只能只读轮询（与 executor 健康探活同样 30s 一次，不写任何文件）。
-   *
-   * 返回 dispose：取消轮询并回到 initialConfig，交给调用方注册进 ctx.effect。
-   */
+  /** 只读轮询：configEditor 没有变更事件，条目被热替换时重绑 source。 */
   function buildSettingsEntryWatcher(): () => void {
     const timer = setInterval(() => {
       const next = findOwnConfigEntry()
@@ -353,55 +273,31 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
         settingsEntry = next
         bindConfigFromEntry()
       }
-    }, EXECUTOR_HEALTH_REFRESH_MS)
+    }, CATALOG_REFRESH_MS)
     ;(timer as unknown as { unref?: () => void }).unref?.()
     return () => {
       clearInterval(timer)
-      resetConfigSource()
+      currentSource = () => initialConfig
+      void refreshSnapshot()
     }
   }
 
-  /** 取消条目绑定，回到 apply() 收到的 initialConfig。 */
-  function resetConfigSource(): void {
-    currentSource = () => initialConfig
-    currentConfig = resolveGated(initialConfig)
-    void refreshExecutorHealth()
-  }
-
-  // —— 系统提示段（order 145）：生效配置启用时注入，对全部预设生效 ——
+  // —— 系统提示段（order 145）——
+  // 读分类缓存而不是 await：提示段装配是同步的，目录刷新走后台周期任务。
   ctx.systemPrompt.section({
     name: VALUE_ROUTER_SECTION_NAME,
     order: VALUE_ROUTER_SECTION_ORDER,
     text: (assembly: {
-      agent?: {
-        session?: { header?: { origin?: string; id?: string; parentSession?: string } }
-      }
+      agent?: { session?: { header?: { origin?: string; id?: string; parentSession?: string } } }
     }) => {
       const header = assembly?.agent?.session?.header
-      const globalConfig = currentSource()
-      if (!resolveConfig(globalConfig).enabled) return ''
-      const sessionId = typeof header?.id === 'string' ? header.id : undefined
-      const override = sessionOverrideFor(sessionId, header?.parentSession)
-      const effective = applyAllowlist(
-        resolveEffectiveConfig(globalConfig, override),
-        hostAllowlist(),
-      )
-      if (!effective.enabled) return ''
-      return buildSystemPromptGuidance(effective, {
+      const raw = resolveConfig(currentSource())
+      if (!raw.enabled) return ''
+      return buildSystemPromptGuidance({ ...classified, enabled: raw.enabled }, {
         role: isSubagentSession(header) ? 'subagent' : 'controller',
       })
     },
   })
-
-  // —— 会话覆写解析：自身 → 父会话 → 全局 ——
-  function sessionOverrideFor(sessionId?: string, parentSessionId?: string): SessionOverrideConfig | undefined {
-    if (sessionId !== undefined) {
-      const own = valueRouterState.getSessionOverride(sessionId)
-      if (own !== undefined) return own
-    }
-    if (parentSessionId !== undefined) return valueRouterState.getSessionOverride(parentSessionId)
-    return undefined
-  }
 
   // —— agent/request 路由：只改写子代理会话（主模型永不被接管）——
   const routedRequestAttempts = new Map<string, { timestamp: number; params: RouteParameters }>()
@@ -414,9 +310,9 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     return `${id}:${value.turn}:${value.step}`
   }
 
-  const pruneRoutedRequestAttempts = (now: number): void => {
+  const pruneRoutedRequestAttempts = (at: number): void => {
     for (const [key, { timestamp }] of routedRequestAttempts) {
-      if (now - timestamp > 10 * 60_000) routedRequestAttempts.delete(key)
+      if (at - timestamp > 10 * 60_000) routedRequestAttempts.delete(key)
     }
     while (routedRequestAttempts.size > 2_048) {
       const oldest = routedRequestAttempts.keys().next().value
@@ -427,7 +323,7 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
   }
 
   ctx.on('agent/request', async (payload, next) => {
-    // lineage 先记（与路由门是两个独立职责）：子会话的父会话归属供覆写查询、轮转计数与计量聚合。
+    // lineage 先记：子会话的父会话归属供线路意图比对与派发聚合使用。
     const sessionId = sessionIdOf(payload)
     const header = payload.agent?.session?.header
     const parentSessionId = typeof header?.parentSession === 'string' ? header.parentSession : undefined
@@ -437,16 +333,9 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
 
     const resolved = await next()
 
-    const globalConfig = currentSource()
-    const base = applyAllowlist(resolveConfig(globalConfig), hostAllowlist())
-
     // 线路意图快照：**必须在任何改写之前**拍下来，且只拍第一次。
-    // 官方注释（dsh-agent runtime-types.d.ts:312-314）明确 next() 首次返回
-    // agent options、其后返回 logged header——一旦本插件改写过，后续 step 读到的
-    // 就是插件自己写的值，"主控原始意图"会被自己污染掉。
-    //
-    // 主会话**也**要记：只有记下父会话（= 用户选的）线路，才能区分
-    // 「子代理没指定、继承了父模型」和「主控显式指定了和父一样的模型」这组固有歧义。
+    // next() 首次返回 agent options、其后返回 logged header——一旦本插件改写过，
+    // 后续 step 读到的就是插件自己写的值，"主控原始意图"会被自己污染掉。
     if (sessionId !== undefined && valueRouterState.intentFor(sessionId) === undefined) {
       const intent: ChildRouteIntent = {
         provider: resolved.provider ?? '',
@@ -458,86 +347,72 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
       }
       valueRouterState.rememberIntent(sessionId, intent)
     }
-    valueRouterState.pruneIntents(CHILD_INTENT_MAX_ENTRIES)
+    valueRouterState.pruneIntents(2_048)
 
-    // 廉价预检：不启用 / 不是子代理 / 无可轮转线路且兜底未配 → 直接放行，不触碰 llm。
-    if (!base.enabled) return resolved
+    // 廉价预检：不启用 / 不是子代理 → 直接放行，不触碰目录。
+    if (!resolveConfig(currentSource()).enabled) return resolved
     if (!isSubagentSession(header)) return resolved
-    if (!base.tiers.some(tier => routableLines(tier.pool).length > 0) && !isCompleteModelRoute(sanitizeExecutor(base.executor))) return resolved
 
-    // 父会话线路 = 用户为这个父会话选的线路（子代理默认继承的就是它）。
-    // 父会话不在表里（插件中途加载/冷恢复）→ undefined，走 ambiguousPolicy 近似。
     const parentIntent = parentSessionId !== undefined ? valueRouterState.intentFor(parentSessionId) : undefined
-    const parentRoute = parentIntent !== undefined ? routeKey(parentIntent.provider, parentIntent.model) : undefined
-    if (sessionId !== undefined) valueRouterState.attachParentRoute(sessionId, parentRoute)
+    const parentRouteKey = parentIntent !== undefined ? routeKey(parentIntent.provider, parentIntent.model) : undefined
+    if (sessionId !== undefined) valueRouterState.attachParentRoute(sessionId, parentRouteKey)
 
-    // 轮转序号：子会话首次观察时分配一次，之后固定不变。
     const rotationIndex = sessionId === undefined
       ? undefined
       : valueRouterState.rotationIndexOf(sessionId, parentSessionId)
+    const intent = sessionId === undefined ? undefined : valueRouterState.intentFor(sessionId)
+    const explicit = isExplicitCaptainRoute(intent, parentRouteKey)
 
-    const override = sessionOverrideFor(sessionId, parentSessionId)
-    const effective = applyAllowlist(
-      resolveEffectiveConfig(globalConfig, override),
-      hostAllowlist(),
-    )
-    const executor = sanitizeExecutor(effective.executor)
-
-    // 目标线路的可用性（所有档位都不可路由时目标就是兜底线路，只探一次）。
-    const { route: target } = pickTargetRoute(effective.tiers, executor, rotationIndex ?? 0)
-    const targetAvailable = (await checkRouteAvailability(ctx.llm, target)) === 'ready'
-    const hasRoutable = effective.tiers.some(tier => routableLines(tier.pool).length > 0)
-    const fallbackAvailable = hasRoutable && isCompleteModelRoute(executor)
-      ? (await checkRouteAvailability(ctx.llm, executor)) === 'ready'
-      : targetAvailable
-
-    const decision = decideSubagentRoute({
-      globalConfig,
-      origin: header?.origin,
-      ...(sessionId !== undefined ? { sessionOverride: valueRouterState.getSessionOverride(sessionId) } : {}),
-      ...(parentSessionId !== undefined ? { parentOverride: valueRouterState.getSessionOverride(parentSessionId) } : {}),
-      resolvedRoute: resolved,
-      ...(sessionId !== undefined ? { intent: valueRouterState.intentFor(sessionId) } : {}),
-      ...(rotationIndex !== undefined ? { rotationIndex } : {}),
-      targetAvailable,
-      fallbackAvailable,
+    const resolution = await routing.resolve({
+      difficulty: DEFAULT_DIFFICULTY,
+      role: DEFAULT_ROLE,
+      route: explicit && intent !== undefined
+        ? { provider: intent.provider, model: intent.model, reasoning_effort: intent.reasoningEffort ?? '' }
+        : undefined,
+      routeSource: 'captain',
+      ...(rotationIndex === undefined ? {} : { rotationIndex }),
     })
-    if (!decision.route) {
-      ctx.logger?.debug?.(`value-router: 放行普通路由（${routeSkipText(decision.reason)}）`)
+
+    if (!resolution.dispatchable) {
+      ctx.logger?.debug?.(`value-router: 放行普通路由（${routeSkipText('not-dispatchable')}：${resolution.reason ?? resolution.routeStatus}）`)
+      return resolved
+    }
+    if (resolved.provider === resolution.provider && resolved.model === resolution.model) {
+      ctx.logger?.debug?.(`value-router: 放行普通路由（${routeSkipText('noop')}）`)
       return resolved
     }
 
-    // 同模型路由是 no-op：保留原请求（含其 reasoningEffort），也不计一次 executor 调用。
-    if (resolved.provider === decision.provider && resolved.model === decision.model) return resolved
-
-    valueRouterState.recordExecutorCall(sessionId)
-    // 记下这次**实际改写**的线路：子代理会话头和 subagent 工具返回都不带模型信息，
-    // 没有这条记录，插件的轮转行为在对话里完全无法验收。
     valueRouterState.recordDispatch({
       sessionId: sessionId ?? '?',
-      provider: decision.provider,
-      model: decision.model,
-      tierIndex: decision.tierIndex,
-      origin: decision.tierIndex === undefined ? 'fallback' : 'pool',
+      provider: resolution.provider,
+      model: resolution.model,
+      ...(resolution.reasoning_effort === '' ? {} : { reasoning_effort: resolution.reasoning_effort }),
+      difficulty: resolution.requestedDifficulty ?? DEFAULT_DIFFICULTY,
+      routeSource: resolution.routeSource,
+      fallback: resolution.fallback,
+      degraded: resolution.degraded,
       at: Date.now(),
     })
     const key = requestKey(payload)
-    const params = routeParameters('subagent', decision.effective.strategy, decision.model)
+    const telemetryDifficulty = resolution.fallback ? 'fallback' : (resolution.requestedDifficulty ?? DEFAULT_DIFFICULTY)
+    const params = routeParameters('subagent', telemetryDifficulty, resolution.model)
     if (key !== undefined) {
-      const now = Date.now()
-      pruneRoutedRequestAttempts(now)
-      routedRequestAttempts.set(key, { timestamp: now, params })
+      const at = Date.now()
+      pruneRoutedRequestAttempts(at)
+      routedRequestAttempts.set(key, { timestamp: at, params })
     }
     emitValueRouterRuntimeTelemetry({ event: 'value_router_route', params, timestamp: new Date().toISOString() })
 
     // 目标模型自己拥有 reasoning effort：不继承原请求的 effort
-    // （executor 不支持该档位时会让整轮失败 UNSUPPORTED_REASONING_EFFORT）。
+    // （目标不支持该档位时会让整轮失败 UNSUPPORTED_REASONING_EFFORT）。
     const { reasoningEffort: _inheritedEffort, ...routed } = resolved as LlmCallConfig & { reasoningEffort?: string }
     return {
       ...routed,
-      provider: decision.provider,
-      model: decision.model,
-      ...(decision.reasoningEffort ? { reasoningEffort: decision.reasoningEffort as LlmCallConfig['reasoningEffort'] } : {}),
+      provider: resolution.provider,
+      model: resolution.model,
+      ...(resolution.reasoning_effort === ''
+        ? {}
+        : { reasoningEffort: resolution.reasoning_effort as LlmCallConfig['reasoningEffort'] }),
     }
   })
 
@@ -577,32 +452,17 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     })
   })
 
-  // —— 状态服务 + 状态控制器（Remote 通道：快照 / 会话指标 / 会话覆写写入）——
-  const service: ValueRouterService = {
-    snapshot: (): ValueRouterStatusSnapshot => {
-      const c = getConfig()
-      return {
-        enabled: c.enabled,
-        strategy: c.strategy,
-        tiers: c.tiers.map(tier => ({ ...tier, pool: tier.pool.map(line => ({ ...line })) })),
-        executor: { ...c.executor },
-        executorStatus: executorHealth.status,
-        ...(executorHealth.reason !== undefined ? { executorReason: executorHealth.reason } : {}),
-        executorCallsTotal: valueRouterState.getGlobalMetrics().executorCalls,
-        tierRouting: c.tierRouting,
-        recentDispatches: valueRouterState.recentDispatches(12).map(record => ({
-          provider: record.provider,
-          model: record.model,
-          tierIndex: record.tierIndex ?? null,
-          origin: record.origin,
-          at: record.at,
-        })),
-        allowlistKnown: hostAllowlist() !== undefined,
-      }
+  // —— 服务 ——
+  // 1) 路由服务：其他插件（Agent Teams）通过能力探测使用。
+  ctx.provide(VALUE_ROUTER_SERVICE_NAME, routing)
+  // 2) 状态快照：顶栏徽章 / 设置卡。
+  const statusService: ValueRouterService = {
+    snapshot: () => {
+      if (Date.now() - snapshotAt > SNAPSHOT_STALE_MS) void refreshSnapshot()
+      return snapshotCache
     },
-    sessionMetrics: (sessionId: string) => valueRouterState.getSessionMetrics(sessionId),
   }
-  ctx.provide('valueRouter', service)
+  ctx.provide('valueRouter', statusService)
 
   let controllerFiber: { await(): Promise<unknown> }
   try {
@@ -612,21 +472,19 @@ export function apply(ctx: Context, initialConfig: Partial<ValueRouterConfig> = 
     controllerFiber = { await: async () => undefined }
   }
 
-  // —— 启动探活 + 周期刷新（ctx.effect 管理生命周期）——
-  void refreshExecutorHealth()
+  // —— 启动刷新 + 周期刷新 ——
+  void refreshSnapshot()
   ctx.effect(() => {
-    const timer = setInterval(() => {
-      void refreshExecutorHealth()
-    }, EXECUTOR_HEALTH_REFRESH_MS)
+    const timer = setInterval(() => { void refreshSnapshot() }, CATALOG_REFRESH_MS)
     ;(timer as unknown as { unref?: () => void }).unref?.()
-    return () => {
-      clearInterval(timer)
-    }
-  }, 'value-router: executor health probe')
+    return () => { clearInterval(timer) }
+  }, 'value-router: catalog refresh')
 
   try {
+    const snapshot = snapshotCache
     ctx.logger?.info?.(
-      `value-router: apply() 完成（strategy=${currentConfig.strategy}, 档位=${currentConfig.tiers.length} 个 / 线路=${currentConfig.tiers.reduce((sum, tier) => sum + tier.pool.length, 0)} 条, 兜底线路=${formatModelRoute(currentConfig.executor)}）`,
+      `value-router: apply() 完成（enabled=${snapshot.enabled}, 可用线路=${snapshot.availableLines} 条, `
+      + `missing=${snapshot.missingLines}, blocked=${snapshot.blockedLines}, 白名单可读=${snapshot.allowlistKnown}）`,
     )
   } catch { /* ignore */ }
 

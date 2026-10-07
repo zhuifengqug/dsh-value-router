@@ -1,17 +1,21 @@
 /**
  * 宿主侧 `valueRouterStatus` Remote 通道（浏览器侧读取层）。
  *
- * 三个方法与 src/typert.ts 的 invocations 一一对应；descriptor 的 typeSymbol
- * 必须与宿主声明**逐字一致** —— DSH 的 api-gateway 只在 dsh-typert-loader 注册了
- * strict typeSymbol 之后才能调度该 Remote 服务。客户端这里的 schema 只是本地
- * 透传编解码（真正的 Zod 校验在宿主侧）。
+ * 两个方法与 src/typert.ts 的 invocations 一一对应（声明顺序 = 线上顺序）；
+ * descriptor 的 typeSymbol 必须与宿主声明**逐字一致** —— DSH 的 api-gateway 只在
+ * dsh-typert-loader 注册了 strict typeSymbol 之后才能调度该 Remote 服务。
+ * 客户端这里的 schema 只是本地透传编解码（真正的 Zod 校验在宿主侧）。
+ *
+ * 0.10.0 删除：`setSessionOverride` 与「本会话覆写」读取（所依赖的
+ * strategy/executor 契约已退役）；`status` 的行形状也从池（pool/strategy/executor）
+ * 收敛为四档线路 + 单一兜底线路。
  *
  * 通道不可用（旧宿主 / 尚未挂载）时保持 undefined，不抛错、不影响开关与设置。
  */
 
 import { useEffect, useRef, useState } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ModelRouteSelection, SessionOverrideConfig, ValueRouterStrategy } from '../core/config.ts'
+import { DEFAULT_DIFFICULTY, isDifficulty, type Difficulty } from '../core/config.ts'
 
 const REMOTE_PACKAGE = '@gjs27/dsh-value-router'
 const REMOTE_TYPES = `${REMOTE_PACKAGE}/types`
@@ -23,55 +27,85 @@ const REMOTE_SERVICE = 'valueRouterStatus'
  * tsconfig.client.json 只收录 src/client/** 与 src/core/**，这里保留一份结构性
  * 镜像，避免客户端工程越过自己的文件边界。
  */
-export interface ValueRouterPoolLineView {
+
+/** 线路可用性，与宿主 `lineStatusSchema` 一致。 */
+export type ValueRouterLineStatus = 'available' | 'missing' | 'blocked'
+
+/** 线路来源，与宿主 `routeSourceSchema` 一致。 */
+export type ValueRouterRouteSource = 'user' | 'captain' | 'difficulty' | 'fallback' | 'none'
+
+/** 线路的排队/解析状态，与宿主 `routeStatusSchema` 一致。 */
+export type ValueRouterRouteStatus = 'resolved' | 'pending' | 'blocked'
+
+/** 一条已配置线路（字段名与配置契约一致：`reasoning_effort` 是 snake_case）。 */
+export interface ValueRouterLineView {
   provider: string
   model: string
-  reasoningEffort: string
-  allowed: boolean
+  reasoning_effort: string
+  status: ValueRouterLineStatus
+  statusDetail?: string
 }
 
-/** 一个档位。顺序即优先级，`tiers[0]` 是最低档 = 兜底轮转池。 */
+/** 一个难度档位；顺序固定 low → medium → high → max。 */
 export interface ValueRouterTierView {
-  id: string
-  label: string
-  pool: ValueRouterPoolLineView[]
+  id: Difficulty
+  lines: ValueRouterLineView[]
 }
 
 /** 一条实际派发记录的浏览器侧镜像。 */
 export interface ValueRouterDispatchView {
   provider: string
   model: string
-  /** 实际派发的档位下标；落在兜底线路时为 null。 */
-  tierIndex: number | null
-  origin: 'pool' | 'explicit' | 'fallback'
+  difficulty: Difficulty
+  routeSource: ValueRouterRouteSource
+  /** 这一条是否走了全局兜底线路。 */
+  fallback: boolean
+  /** 是否降级到更低档命中。 */
+  degraded: boolean
   at: number
+}
+
+/** 一条运行事件的浏览器侧镜像（字段可缺，逐项兜底）。 */
+export interface ValueRouterRouteEventView {
+  type: string
+  at: number
+  teamId?: string
+  taskId?: string
+  member?: string
+  sessionId?: string
+  difficulty?: string
+  role?: string
+  route?: { provider: string; model: string; reasoning_effort?: string }
+  routeSource?: ValueRouterRouteSource
+  routeStatus?: ValueRouterRouteStatus
+  detail?: string
+  queueReason?: string
 }
 
 export interface ValueRouterStatusView {
   enabled: boolean
-  strategy: ValueRouterStrategy
   tiers: ValueRouterTierView[]
-  executor: ModelRouteSelection
-  executorStatus: 'active' | 'disabled' | 'unconfigured' | 'degraded'
-  executorReason?: string
-  executorCallsTotal: number
-  tierRouting: 'tier-rotate' | 'controller'
-  recentDispatches: ValueRouterDispatchView[]
+  fallback: ValueRouterLineView
+  availableLines: number
+  missingLines: number
+  blockedLines: number
   allowlistKnown: boolean
+  routedCallsTotal: number
+  recentDispatches: ValueRouterDispatchView[]
+  recentEvents: ValueRouterRouteEventView[]
 }
 
 /** 会话计量线上形状（src/status-controller.ts 的 SessionMetricsWire 镜像）。 */
 export interface ValueRouterSessionMetrics {
-  executorCalls: number
-  override: SessionOverrideConfig | null
-  /** 本会话（含后代子代理）的实际派发记录，最新的在前。 */
+  routedCalls: number
+  /** 本会话（含后代子代理）的实际派发记录。 */
   recentDispatches: ValueRouterDispatchView[]
 }
 
+/** 只有宿主的 `status` / `sessionMetrics` 两个方法存在（0.10.0 删除了会话覆写写入）。 */
 export interface ValueRouterRemoteFace {
   status(input: Record<string, unknown>): Promise<unknown>
   sessionMetrics(input: { sessionId?: string }): Promise<unknown>
-  setSessionOverride(input: { sessionId: string; override: SessionOverrideConfig | null }): Promise<unknown>
 }
 
 // —— descriptor（id 与 typeSymbol 与宿主 src/typert.ts 对齐） ——
@@ -120,7 +154,6 @@ export const REMOTE_CONTRIBUTION = {
   descriptors: [
     descriptor('status', `${REMOTE_TYPES}#StatusInput`, `${REMOTE_TYPES}#ValueRouterStatusStatusResult`),
     descriptor('sessionMetrics', `${REMOTE_TYPES}#SessionMetricsInput`, `${REMOTE_TYPES}#ValueRouterStatusSessionMetricsResult`),
-    descriptor('setSessionOverride', `${REMOTE_TYPES}#SetSessionOverrideInput`, `${REMOTE_TYPES}#ValueRouterStatusSetSessionOverrideResult`),
   ],
 }
 
@@ -191,106 +224,138 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback
   return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? value as T : fallback
 }
 
-function asRoute(value: unknown): { provider: string; model: string; reasoningEffort: string } {
-  const route = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>
-  return {
-    provider: typeof route.provider === 'string' ? route.provider : '',
-    model: typeof route.model === 'string' ? route.model : '',
-    reasoningEffort: typeof route.reasoningEffort === 'string' ? route.reasoningEffort : '',
+const LINE_STATUSES = ['available', 'missing', 'blocked'] as const
+const ROUTE_SOURCES = ['user', 'captain', 'difficulty', 'fallback', 'none'] as const
+const ROUTE_STATUSES = ['resolved', 'pending', 'blocked'] as const
+
+/** 逐条解码一个数组，坏条目丢弃、其余照常。 */
+function listOf<T>(value: unknown, decode: (item: unknown) => T | undefined): T[] {
+  if (!Array.isArray(value)) return []
+  const out: T[] = []
+  for (const item of value) {
+    const decoded = decode(item)
+    if (decoded !== undefined) out.push(decoded)
   }
+  return out
 }
 
-/** 轮转池的单条线路视图（宿主可能送来半残数据，逐项兜底）。 */
-function asPoolLine(value: unknown): ValueRouterPoolLineView | undefined {
+/** 一条线路：provider/model 缺一就丢弃这一条，其余字段逐项兜底。 */
+function asLine(value: unknown): ValueRouterLineView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
   if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return undefined
+  const detail = optionalString(raw.statusDetail)
   return {
     provider: raw.provider,
     model: raw.model,
-    reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
-    allowed: raw.allowed !== false,
+    reasoning_effort: typeof raw.reasoning_effort === 'string' ? raw.reasoning_effort : '',
+    status: oneOf(raw.status, LINE_STATUSES, 'missing' as ValueRouterLineStatus),
+    ...(detail !== undefined ? { statusDetail: detail } : {}),
   }
-}
-
-/** 一条派发记录：字段缺失就丢弃这一条，不影响其余。 */
-function asDispatch(value: unknown): ValueRouterDispatchView[] {
-  if (typeof value !== 'object' || value === null) return []
-  const raw = value as Record<string, unknown>
-  if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return []
-  return [{
-    provider: raw.provider,
-    model: raw.model,
-    tierIndex: typeof raw.tierIndex === 'number' ? raw.tierIndex : null,
-    origin: raw.origin === 'explicit' || raw.origin === 'fallback' ? raw.origin : 'pool',
-    at: num(raw.at),
-  }]
 }
 
 /** 档位视图：逐项兜底，宿主送来半残数据时不至于整档消失。 */
 function asTier(value: unknown): ValueRouterTierView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
-  if (typeof raw.id !== 'string' || typeof raw.label !== 'string') return undefined
+  if (!isDifficulty(raw.id)) return undefined
   return {
     id: raw.id,
-    label: raw.label,
-    pool: Array.isArray(raw.pool)
-      ? raw.pool.map(asPoolLine).filter((line): line is ValueRouterPoolLineView => line !== undefined)
-      : [],
+    lines: listOf(raw.lines, asLine),
   }
 }
 
-/** 只保留本插件拥有的最小数据对象，不持有任何宿主对象引用。 */
+/** 一条派发记录：字段缺失就丢弃这一条，不影响其余。 */
+function asDispatch(value: unknown): ValueRouterDispatchView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return undefined
+  return {
+    provider: raw.provider,
+    model: raw.model,
+    difficulty: isDifficulty(raw.difficulty) ? raw.difficulty : DEFAULT_DIFFICULTY,
+    routeSource: oneOf(raw.routeSource, ROUTE_SOURCES, 'none' as ValueRouterRouteSource),
+    fallback: raw.fallback === true,
+    degraded: raw.degraded === true,
+    at: num(raw.at),
+  }
+}
+
+function asEventRoute(value: unknown): ValueRouterRouteEventView['route'] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  if (typeof raw.provider !== 'string' || typeof raw.model !== 'string') return undefined
+  const effort = optionalString(raw.reasoning_effort)
+  return {
+    provider: raw.provider,
+    model: raw.model,
+    ...(effort !== undefined ? { reasoning_effort: effort } : {}),
+  }
+}
+
+/** 一条运行事件：`type` 是唯一必需字段，其余逐项兜底。 */
+function asEvent(value: unknown): ValueRouterRouteEventView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+  const type = optionalString(raw.type)
+  if (type === undefined) return undefined
+  const event: ValueRouterRouteEventView = { type, at: num(raw.at) }
+  const teamId = optionalString(raw.teamId)
+  if (teamId !== undefined) event.teamId = teamId
+  const taskId = optionalString(raw.taskId)
+  if (taskId !== undefined) event.taskId = taskId
+  const member = optionalString(raw.member)
+  if (member !== undefined) event.member = member
+  const sessionId = optionalString(raw.sessionId)
+  if (sessionId !== undefined) event.sessionId = sessionId
+  const difficulty = optionalString(raw.difficulty)
+  if (difficulty !== undefined) event.difficulty = difficulty
+  const role = optionalString(raw.role)
+  if (role !== undefined) event.role = role
+  const route = asEventRoute(raw.route)
+  if (route !== undefined) event.route = route
+  if (typeof raw.routeSource === 'string') event.routeSource = oneOf(raw.routeSource, ROUTE_SOURCES, 'none' as ValueRouterRouteSource)
+  if (typeof raw.routeStatus === 'string') event.routeStatus = oneOf(raw.routeStatus, ROUTE_STATUSES, 'pending' as ValueRouterRouteStatus)
+  const detail = optionalString(raw.detail)
+  if (detail !== undefined) event.detail = detail
+  const queueReason = optionalString(raw.queueReason)
+  if (queueReason !== undefined) event.queueReason = queueReason
+  return event
+}
+
+/**
+ * 只保留本插件拥有的最小数据对象，不持有任何宿主对象引用。
+ *
+ * 形状不认识时返回 undefined（而不是拼一个半残对象）：调用方据此把
+ * 「通道断了」和「宿主返回了别的东西」两类失败分开报告。
+ */
 function asStatusSnapshot(value: unknown): ValueRouterStatusView | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
-  if (typeof raw.enabled !== 'boolean' || typeof raw.strategy !== 'string') return undefined
+  if (typeof raw.enabled !== 'boolean' || !Array.isArray(raw.tiers)) return undefined
+  const fallback = asLine(raw.fallback)
+  if (fallback === undefined) return undefined
   return {
     enabled: raw.enabled,
-    strategy: oneOf(raw.strategy, ['saver', 'balanced', 'powerful'] as const, 'balanced'),
-    tiers: Array.isArray(raw.tiers)
-      ? raw.tiers.map(asTier).filter((tier): tier is ValueRouterTierView => tier !== undefined)
-      : [],
-    executor: asRoute(raw.executor),
-    executorStatus: oneOf(raw.executorStatus, ['active', 'disabled', 'unconfigured', 'degraded'] as const, 'disabled'),
-    ...(optionalString(raw.executorReason) !== undefined ? { executorReason: optionalString(raw.executorReason) } : {}),
-    executorCallsTotal: num(raw.executorCallsTotal),
-    tierRouting: raw.tierRouting === 'controller' ? 'controller' : 'tier-rotate',
-    recentDispatches: Array.isArray(raw.recentDispatches)
-      ? raw.recentDispatches.flatMap(asDispatch)
-      : [],
+    tiers: listOf(raw.tiers, asTier),
+    fallback,
+    availableLines: num(raw.availableLines),
+    missingLines: num(raw.missingLines),
+    blockedLines: num(raw.blockedLines),
     allowlistKnown: raw.allowlistKnown !== false,
+    routedCallsTotal: num(raw.routedCallsTotal),
+    recentDispatches: listOf(raw.recentDispatches, asDispatch),
+    recentEvents: listOf(raw.recentEvents, asEvent),
   }
-}
-
-function asOverride(value: unknown): SessionOverrideConfig | null {
-  if (typeof value !== 'object' || value === null) return null
-  const raw = value as Record<string, unknown>
-  const out: SessionOverrideConfig = {}
-  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
-  if (raw.strategy === 'saver' || raw.strategy === 'balanced' || raw.strategy === 'powerful') out.strategy = raw.strategy
-  if (typeof raw.executor === 'object' && raw.executor !== null) {
-    const route = raw.executor as Record<string, unknown>
-    const executor: NonNullable<SessionOverrideConfig['executor']> = {}
-    if (typeof route.provider === 'string') executor.provider = route.provider
-    if (typeof route.model === 'string') executor.model = route.model
-    if (typeof route.reasoningEffort === 'string') executor.reasoningEffort = route.reasoningEffort
-    out.executor = executor
-  }
-  return Object.keys(out).length > 0 ? out : null
 }
 
 function asSessionMetrics(value: unknown): ValueRouterSessionMetrics | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const raw = value as Record<string, unknown>
-  if (typeof raw.executorCalls !== 'number') return undefined
+  if (typeof raw.routedCalls !== 'number') return undefined
   return {
-    executorCalls: num(raw.executorCalls),
-    override: asOverride(raw.override),
-    recentDispatches: Array.isArray(raw.recentDispatches)
-      ? raw.recentDispatches.flatMap(asDispatch)
-      : [],
+    routedCalls: num(raw.routedCalls),
+    recentDispatches: listOf(raw.recentDispatches, asDispatch),
   }
 }
 
@@ -363,9 +428,10 @@ export function useLiveStatus(ctx: Context | undefined, active: boolean): LiveSt
 }
 
 /**
- * 订阅宿主侧会话计量与「本会话覆写」。
+ * 订阅宿主侧「本会话（含后代子代理）」的改写次数与派发记录。
  *
- * `refreshToken` 变化会立即重读一次（写入覆写后用于回读宿主结果）。
+ * `refreshToken` 变化会立即重读一次；只读通道下没有写入后的回读需求，
+ * 保留该入参是为了调用方仍可主动触发一次刷新。
  */
 export function useLiveSessionMetrics(
   ctx: Context | undefined,
@@ -405,24 +471,4 @@ export function useLiveSessionMetrics(
   }, [ctx, sessionId, active, refreshToken])
 
   return metrics
-}
-
-/**
- * 写入 / 清除会话级覆写（不污染全局设置）。返回是否被宿主接受。
- */
-export async function writeSessionOverride(
-  ctx: Context | undefined,
-  sessionId: string | undefined,
-  override: SessionOverrideConfig | null,
-): Promise<boolean> {
-  if (!ctx || !sessionId) return false
-  try {
-    const face = await mountRemote(ctx)
-    if (!face || typeof face.setSessionOverride !== 'function') return false
-    const raw = unwrapEnvelope(await face.setSessionOverride({ sessionId, override }))
-    if (typeof raw !== 'object' || raw === null) return false
-    return (raw as { ok?: unknown }).ok === true
-  } catch {
-    return false
-  }
 }

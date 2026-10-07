@@ -54,13 +54,17 @@ export function describeFormState(snapshot: {
  *
  * 两个宿主硬性要求，都踩过：
  *
- * 1. **路径必须精确落在 volatile 字段上**（`dsh-settings/lib/index.js:507`）。
- *    `executor` 本身不是 volatile（普通对象，volatile 在子字段上），所以不能整对象写。
+ * 1. **路径必须精确落在 volatile 字段上**（`dsh-settings` 的
+ *    `if (path.length && !isVolatilePath(schema, path)) throw new Error('Config field "…" is not volatile')`）。
+ *    本插件的三个 volatile 是**整棵子树**（`enabled` / `tiers` / `fallback`），
+ *    所以顶层键直接就是合法的 volatile 路径，不需要再拆叶子。
  * 2. **路径必须是多段数组**。`ConfigForm.set(field, value)` 的实现是
  *    `mutate([{ op:'set', path: [field], value }])`——它把 `field` 整个当作**一个**路径段。
- *    传 `'executor.provider'` 会得到 `['executor.provider']`，宿主按
- *    `schema.dict['executor.provider']` 查表必然查不到，于是**静默拒写**
- *    （返回 false，不抛错）。嵌套字段只能走 `mutate()` + `['executor','provider']`。
+ *    传 `'fallback.provider'` 会得到 `['fallback.provider']`，宿主按
+ *    `schema.dict['fallback.provider']` 查表必然查不到，于是**静默拒写**（返回 false，不抛错）。
+ *
+ * 另外：`tiers` 与 `fallback` **整对象写**，不要下探到数组下标。宿主 `mergeLayers`
+ * 对数组是整体替换，按下标写会与并发编辑器互相覆盖。
  */
 export interface WriteOp {
   op: 'set'
@@ -72,13 +76,6 @@ export function expandWriteOps(patch: Partial<ValueRouterConfig>): WriteOp[] {
   const ops: WriteOp[] = []
   for (const [key, value] of Object.entries(structuredClone(patch))) {
     if (value === undefined) continue
-    if (key === 'executor' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      for (const [leaf, leafValue] of Object.entries(value as Record<string, unknown>)) {
-        if (leafValue === undefined) continue
-        ops.push({ op: 'set', path: ['executor', leaf], value: leafValue })
-      }
-      continue
-    }
     ops.push({ op: 'set', path: [key], value })
   }
   return ops
