@@ -1,6 +1,6 @@
 {
   "name": "@gjs27/dsh-value-router",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "价值路由（Value Router）：DSH 会话内成本感知协作层——主模型永不被接管，带工具的子任务自动下沉给便宜的 executor 子代理；只做子代理路由，不外发网页端。",
   "license": "MIT",
   "type": "module",

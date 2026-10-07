@@ -5,6 +5,54 @@
 
 ---
 
+## 0.10.0 — 2026-10-07
+
+**统一模型路由**：插件从「按价值把带工具的子任务下沉给便宜的 executor 子代理」
+改为 **DSH 唯一的模型路由 owner**。调用方提交结构化 `difficulty + role + route`，
+插件返回最终 `provider / model / reasoning_effort`；调用方在成员创建时**冻结**该线路
+并记录到自己的状态文件，启动后不中途换模型。对外只暴露一个服务 `valueRouterRouting`
+（`catalog` / `validate` / `resolve` / `record`）。
+
+### Breaking
+
+- **配置 schema 收敛为固定四档 `low / medium / high / max` + 单一全局 `fallback`。**
+  `pool`、动态 `tiers`、`executor`、`strategy`、`ambiguousPolicy`、`tierRouting`、
+  会话级覆写整体退役；**不做旧配置迁移，也不做双读兼容**。
+- 随 executor 概念一并退役的还有桥接通道、委派计数、token 估算与批次进度。
+- 设置卡与顶栏状态不再呈现「轮转池 / 兜底线路」，改为四档线路、档内成员与审计事件。
+
+### Added
+
+- `valueRouterRouting` 服务（`src/service.ts`）：`catalog` / `validate` / `resolve` /
+  `record`。`validate` 不查目录（纯校验）；`resolve` 会同时查目录，并自动记一条审计事件。
+- `src/core/catalog.ts`：**宿主 LLM 目录是 provider / model 的唯一真源**——只有显式分档
+  的线路可派发，新模型默认未分档。
+- `src/core/intent.ts`：`difficulty + role + route` 意图校验。
+- `src/core/route.ts`：档内轮转 → 同档替代 → 逐档降级（**只降不升**）→ 全局 fallback；
+  全局 fallback 不参与轮转。
+- `src/core/audit.ts`：路由审计事件（`validate` / `tier-rotate` / `route-rejected` /
+  `queue` 等）。
+- 用户硬指定线路不可用时**保持未解析、不走 fallback**；调用方给出的非法 route 记
+  `route-rejected` 后自动重选；自动路由禁止无提示升档。
+- 测试：`test/catalog.test.ts`、`test/intent.test.ts`、`test/route.test.ts`、
+  `test/audit.test.ts`、`test/service.test.ts`。
+
+### 验证
+
+- `pnpm typecheck`（宿主 + 客户端两个 tsconfig）零错误。
+- `pnpm test`：10 个文件 / 106 个用例全通过。
+- `pnpm build`（tsdown）通过。
+
+### 已知文档缺口
+
+- **`README.md` 尚未重写**：仍在描述已退役的 `pool` 轮转池与 `executor` 兜底线路，
+  全文没有出现四档、`valueRouterRouting`、`difficulty` 等 0.10.0 的概念。此处如实标注，
+  不假装文档已同步。
+- `package.json` 的 `description` 同样仍是 executor 时代的说法（「带工具的子任务自动
+  下沉给便宜的 executor 子代理」）。
+
+---
+
 ## 0.9.0 — 2026-09-30
 
 **适配 DSH 0.2.0-rc.2**（宿主 `@deepseek-ai/dsh-desktop@0.2.0-rc.2`）。
@@ -371,6 +419,41 @@
 
 <a id="changelog-english"></a>
 # Changelog (English)
+
+## 0.10.0 — 2026-10-07
+
+**Unified model routing.** The plugin no longer sinks tool-bearing subtasks onto a
+cheaper `executor` subagent; it is now **DSH's single model-routing owner**. A caller
+submits a structured `difficulty + role + route` intent and receives the final
+`provider / model / reasoning_effort`, which it freezes at member-creation time and
+records in its own state file — no mid-run model swap. One service is exposed:
+`valueRouterRouting` (`catalog` / `validate` / `resolve` / `record`).
+
+**Breaking:** the config schema collapses to four fixed tiers `low / medium / high /
+max` plus a single global `fallback`. `pool`, dynamic `tiers`, `executor`, `strategy`,
+`ambiguousPolicy`, `tierRouting` and the session-level override are retired, with **no
+migration and no dual-read compatibility**. The bridge channel, delegation counters,
+token estimates and batch progress retire together with the executor concept. The
+settings card and header status now show the four tiers, in-tier members and audit
+events instead of a rotation pool and a fallback line.
+
+**Added:** `src/core/catalog.ts` (the host LLM catalog is the single source of truth —
+only explicitly tiered routes are dispatchable, new models start untiered),
+`src/core/intent.ts` (intent validation), `src/core/route.ts` (in-tier rotation →
+same-tier substitution → downward-only degradation → global fallback, which never
+rotates), `src/core/audit.ts` (audit events) and `src/service.ts`
+(`valueRouterRouting`). A user-pinned route that is unavailable stays unresolved
+instead of falling back; an invalid caller route is recorded as `route-rejected` and
+re-selected; automatic routing never upgrades a tier silently. Five new test files
+cover catalog, intent, route, audit and service.
+
+**Verification:** `pnpm typecheck` (host and client tsconfigs) clean; `pnpm test`
+10 files / 106 cases green; `pnpm build` clean.
+
+**Known documentation gap:** `README.md` has not been rewritten yet — it still
+describes the retired pool/executor design and never mentions the four tiers or
+`valueRouterRouting`. The `description` field in `package.json` is likewise still
+written for the executor era.
 
 ## 0.9.0 — 2026-09-30
 
