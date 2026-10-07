@@ -43,13 +43,11 @@
 - `pnpm test`：10 个文件 / 106 个用例全通过。
 - `pnpm build`（tsdown）通过。
 
-### 已知文档缺口
+### 文档
 
-- **`README.md` 尚未重写**：仍在描述已退役的 `pool` 轮转池与 `executor` 兜底线路，
-  全文没有出现四档、`valueRouterRouting`、`difficulty` 等 0.10.0 的概念。此处如实标注，
-  不假装文档已同步。
-- `package.json` 的 `description` 同样仍是 executor 时代的说法（「带工具的子任务自动
-  下沉给便宜的 executor 子代理」）。
+`README.md` 与 `package.json` 的 `description` 已按 0.10.0 重写：四档配置形状与全局兜底、
+冻结的解析顺序与两条硬路由语义、`available` / `missing` / `blocked` 三态与白名单闸门、
+`valueRouterRouting` 能力服务（含给调用方的示例与审计说明）、破坏性升级步骤。
 
 ---
 
@@ -450,10 +448,11 @@ cover catalog, intent, route, audit and service.
 **Verification:** `pnpm typecheck` (host and client tsconfigs) clean; `pnpm test`
 10 files / 106 cases green; `pnpm build` clean.
 
-**Known documentation gap:** `README.md` has not been rewritten yet — it still
-describes the retired pool/executor design and never mentions the four tiers or
-`valueRouterRouting`. The `description` field in `package.json` is likewise still
-written for the executor era.
+**Docs:** `README.md` and the `package.json` `description` were rewritten for 0.10.0 —
+the four-tier configuration with its single global fallback, the frozen resolution
+order and both hard-route semantics, the `available` / `missing` / `blocked` line
+states with the allowlist gate, the `valueRouterRouting` service (with a caller
+example and the audit model), and the breaking upgrade steps.
 
 ## 0.9.0 — 2026-09-30
 
